@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import {
   assertProviderReady,
   ConnectorError,
+  draftEvaluation,
+  extractEvidence,
   generateIdeas,
   listModels,
   normalizeConfig,
@@ -21,6 +23,8 @@ const CHANNELS = Object.freeze({
   testConnection: "idea-foundry:llm:test-connection",
   listModels: "idea-foundry:llm:list-models",
   generateIdeas: "idea-foundry:llm:generate-ideas",
+  draftEvaluation: "idea-foundry:llm:draft-evaluation",
+  extractEvidence: "idea-foundry:llm:extract-evidence",
 });
 
 let mainWindow = null;
@@ -145,6 +149,20 @@ function registerIpc() {
     const count = input?.count;
     const config = await resolvedConfig(input);
     return generateIdeas(config, prompt, count);
+  }));
+  ipcMain.handle(CHANNELS.draftEvaluation, safeHandler(async (input = {}) => {
+    const config = await resolvedConfig(input);
+    return draftEvaluation(config, {
+      projectContext: input?.projectContext,
+      claimIds: input?.claimIds,
+    });
+  }));
+  ipcMain.handle(CHANNELS.extractEvidence, safeHandler(async (input = {}) => {
+    const config = await resolvedConfig(input);
+    return extractEvidence(config, {
+      sourceText: input?.sourceText,
+      sourceLabel: input?.sourceLabel,
+    });
   }));
 }
 

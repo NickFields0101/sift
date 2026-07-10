@@ -37,6 +37,24 @@ test("AI generation cannot write deterministic review inputs", async () => {
   assert.doesNotMatch(generationFunction, /updateReview|updateClaim|updateGate|artifacts|gates|claims/);
 });
 
+test("AI evaluation and evidence IPC exposes proposal-only operations", async () => {
+  const [bridge, preload, main, core] = await Promise.all([
+    readFile(new URL("../app/desktop-bridge.d.ts", import.meta.url), "utf8"),
+    readFile(new URL("../desktop/preload.cjs", import.meta.url), "utf8"),
+    readFile(new URL("../desktop/main.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../desktop/llm-core.mjs", import.meta.url), "utf8"),
+  ]);
+  assert.match(preload, /draftEvaluation: \(input\) => ipcRenderer\.invoke\(CHANNELS\.draftEvaluation, input\)/);
+  assert.match(preload, /extractEvidence: \(input\) => ipcRenderer\.invoke\(CHANNELS\.extractEvidence, input\)/);
+  assert.doesNotMatch(preload, /updateReview|updateClaim|updateGate|verifyEvidence|writeArtifact/);
+  assert.match(main, /draftEvaluation\(config, \{/);
+  assert.match(main, /extractEvidence\(config, \{/);
+  assert.match(bridge, /reviewerVerified: false/);
+  assert.match(core, /reviewerVerified: false/);
+  assert.match(core, /sourceText\.includes\(excerpt\)/);
+  assert.doesNotMatch(core, /scoreReview|calculateGenerationPriority|EVIDENCE_MULTIPLIER/);
+});
+
 test("OpenRouter keys stay encrypted, provider-bound, and pinned to OpenRouter", async () => {
   const [core, main, page] = await Promise.all([
     readFile(new URL("../desktop/llm-core.mjs", import.meta.url), "utf8"),
