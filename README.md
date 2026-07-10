@@ -8,12 +8,18 @@ No account or ChatGPT sign-in is required in the desktop edition.
 
 Download the latest files from [GitHub Releases](https://github.com/NickFields0101/idea-foundry/releases/latest).
 
-- **Installer:** download `Idea-Foundry-Setup-0.2.0-x64.exe`, double-click it, choose an install folder, and launch Idea Foundry from the desktop or Start menu.
-- **Portable:** download `Idea-Foundry-Portable-0.2.0-x64.exe` and double-click it. It runs without installing anything.
+- **Installer:** download `Idea-Foundry-Setup-0.3.0-x64.exe`, double-click it, choose an install folder, and launch Idea Foundry from the desktop or Start menu.
+- **Portable:** download `Idea-Foundry-Portable-0.3.0-x64.exe` and double-click it. It runs without installing anything.
 
 No app account, wallet, ChatGPT sign-in, or AI connection is required. The app works immediately with manual ideas and the starter slate. Connecting Ollama, LM Studio, OpenRouter, or another compatible model is optional. Choosing OpenRouter requires the user's own OpenRouter account, API key, and credits.
 
-Version `0.2.0` is not yet code-signed, so Windows SmartScreen may display an **Unknown publisher** warning. Verify the download against `SHA256SUMS.txt` on the release page before choosing **More info** and **Run anyway**. Organizations distributing the app broadly should code-sign future builds.
+Version `0.3.0` is not yet code-signed, so Windows SmartScreen may display an **Unknown publisher** warning. Verify the download against `SHA256SUMS.txt` on the release page before choosing **More info** and **Run anyway**. Organizations distributing the app broadly should code-sign future builds.
+
+## Download and install on macOS
+
+Download the latest DMG from [GitHub Releases](https://github.com/NickFields0101/idea-foundry/releases/latest). Choose `arm64` for Apple silicon Macs or `x64` for Intel Macs running macOS 12 Monterey or newer, open the DMG, and drag Idea Foundry into Applications. ZIP packages are also provided for manual deployment.
+
+The current macOS packages are unsigned and not notarized. Verify `SHA256SUMS.txt`, then right-click Idea Foundry and choose **Open** if Gatekeeper warns about an unidentified developer. Future broad distribution should use an Apple Developer ID certificate and notarization. See [macOS distribution](docs/macos-distribution.md) for build, architecture, signing, and release details.
 
 The app deliberately separates two questions:
 
@@ -36,7 +42,7 @@ To connect a model:
 
 1. Start Ollama or the LM Studio local server, obtain an OpenRouter API key, or obtain the base URL for another compatible endpoint.
 2. Open **LLM** in the desktop navigation.
-3. Select the provider and enter or refresh the model ID.
+3. Select the provider, refresh the model catalog, and search by friendly name, version, provider, or exact ID. For example, typing `4.8` shows matching 4.8 models exposed by that provider.
 4. Paste an API key when required. OpenRouter always requires one.
 5. Test the connection and save it locally.
 6. Open **Ideas** and choose **Generate with connected LLM**.
@@ -102,6 +108,12 @@ Create Windows installer and portable packages:
 
 ```bash
 npm run desktop:package
+```
+
+Create macOS Intel and Apple silicon DMG/ZIP packages (must run on macOS, or use GitHub Actions):
+
+```bash
+npm run desktop:package:mac
 ```
 
 Run all web, scoring, connector, and security tests:

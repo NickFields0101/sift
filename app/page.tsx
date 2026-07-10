@@ -28,6 +28,7 @@ import {
   type ReviewInput,
   type Stage,
 } from "./lib/scoring";
+import { searchLlmModels } from "./lib/model-search";
 import type {
   LlmConfig,
   LlmConnectionOptions,
@@ -394,6 +395,8 @@ export default function Home() {
   const [llmApiKey, setLlmApiKey] = useState("");
   const [clearLlmApiKey, setClearLlmApiKey] = useState(false);
   const [llmModels, setLlmModels] = useState<Array<{ id: string; name: string }>>([]);
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelListError, setModelListError] = useState("");
   const [llmBusy, setLlmBusy] = useState<"loading" | "saving" | "testing" | "models" | null>(null);
   const [llmMessage, setLlmMessage] = useState("");
   const [llmMessageTone, setLlmMessageTone] = useState<"neutral" | "success" | "error">("neutral");
@@ -513,6 +516,11 @@ export default function Home() {
     }. Output compact JSON suitable for manual entry into Idea Foundry.`;
   }, [state.profile, state.project.domain]);
 
+  const visibleModels = useMemo(() => {
+    return searchLlmModels(llmModels, modelSearch, [LLM_PROVIDERS[llmConfig.provider].label, llmConfig.provider]);
+  }, [llmConfig.provider, llmModels, modelSearch]);
+  const displayedModels = useMemo(() => visibleModels.slice(0, 60), [visibleModels]);
+
   function updateReview(patch: Partial<ReviewInput>) {
     setState((current) => ({ ...current, review: { ...current.review, ...patch } }));
   }
@@ -629,11 +637,15 @@ export default function Home() {
     const bridge = window.ideaFoundry;
     if (!bridge?.desktop) return;
     setLlmBusy("models");
+    setModelListError("");
     setLlmMessage("Reading the models exposed by this endpoint…");
     setLlmMessageTone("neutral");
     try {
       const models = await bridge.llm.listModels(currentLlmInput() as LlmConnectionOptions);
       setLlmModels(models);
+      if (models.length === 0) {
+        setModelListError("The endpoint responded, but reported no models. You can still enter an exact model ID manually.");
+      }
       if (!llmConfig.model && models.length === 1) {
         setLlmConfig((current) => ({ ...current, model: models[0].id }));
       }
@@ -641,7 +653,9 @@ export default function Home() {
       setLlmMessageTone(models.length ? "success" : "error");
     } catch (error) {
       setLlmModels([]);
-      setLlmMessage(error instanceof Error ? error.message : "Could not list models.");
+      const message = error instanceof Error ? error.message : "Could not list models.";
+      setModelListError(message);
+      setLlmMessage(message);
       setLlmMessageTone("error");
     } finally {
       setLlmBusy(null);
@@ -1035,6 +1049,8 @@ export default function Home() {
                           setLlmApiKey("");
                           setClearLlmApiKey(false);
                           setLlmModels([]);
+                          setModelSearch("");
+                          setModelListError("");
                           setLlmMessage("");
                         }}
                       >
@@ -1052,11 +1068,80 @@ export default function Home() {
                       <span>Base URL</span>
                       <input value={llmConfig.baseUrl} spellCheck={false} readOnly={selectedLlmProvider.lockedEndpoint} aria-readonly={selectedLlmProvider.lockedEndpoint} onChange={(event) => setLlmConfig((current) => ({ ...current, baseUrl: event.target.value }))} />
                     </label>
-                    <label className="full-field">
-                      <span>Model</span>
-                      <input list="available-llm-models" value={llmConfig.model} placeholder="Choose or enter a model ID" onChange={(event) => setLlmConfig((current) => ({ ...current, model: event.target.value }))} />
-                      <datalist id="available-llm-models">{llmModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
-                    </label>
+                    <div className="model-picker-field">
+                      <label className="full-field">
+                        <span>Search available models</span>
+                        <input
+                          role="combobox"
+                          aria-controls="available-llm-models"
+                          aria-expanded={visibleModels.length > 0}
+                          aria-autocomplete="list"
+                          value={modelSearch}
+                          placeholder="Try 4.8, Opus, Llama, or a model ID"
+                          onChange={(event) => setModelSearch(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "ArrowDown" && visibleModels.length > 0) {
+                              event.preventDefault();
+                              document.getElementById("model-option-0")?.focus();
+                            }
+                            if (event.key === "Enter" && visibleModels.length > 0) {
+                              event.preventDefault();
+                              setLlmConfig((current) => ({ ...current, model: visibleModels[0].id }));
+                            }
+                          }}
+                        />
+                      </label>
+                      {llmBusy === "models" ? (
+                        <div className="model-list-state" role="status">Loading models from {selectedLlmProvider.label}…</div>
+                      ) : modelListError ? (
+                        <div className="model-list-state error" role="status">{modelListError}</div>
+                      ) : llmModels.length === 0 ? (
+                        <div className="model-list-state">No catalog loaded. Refresh models or use the exact model ID field.</div>
+                      ) : visibleModels.length === 0 ? (
+                        <div className="model-list-state">No model matches “{modelSearch}”. Search checks model names, IDs, and provider.</div>
+                      ) : (
+                        <div className="model-options" id="available-llm-models" role="listbox" aria-label="Available models">
+                          {displayedModels.map((model, index) => (
+                            <button
+                              id={`model-option-${index}`}
+                              role="option"
+                              aria-selected={llmConfig.model === model.id}
+                              className={llmConfig.model === model.id ? "selected" : ""}
+                              key={model.id}
+                              onClick={() => setLlmConfig((current) => ({ ...current, model: model.id }))}
+                              onKeyDown={(event) => {
+                                if (event.key === "ArrowDown") {
+                                  event.preventDefault();
+                                  document.getElementById(`model-option-${Math.min(index + 1, displayedModels.length - 1)}`)?.focus();
+                                }
+                                if (event.key === "ArrowUp") {
+                                  event.preventDefault();
+                                  if (index === 0) {
+                                    (event.currentTarget.closest(".model-picker-field")?.querySelector('[role="combobox"]') as HTMLElement | null)?.focus();
+                                  } else {
+                                    document.getElementById(`model-option-${index - 1}`)?.focus();
+                                  }
+                                }
+                                if (event.key === "Escape") {
+                                  (event.currentTarget.closest(".model-picker-field")?.querySelector('[role="combobox"]') as HTMLElement | null)?.focus();
+                                }
+                              }}
+                            >
+                              <span><strong>{model.name || model.id}</strong><small>{model.id}</small></span>
+                              {llmConfig.model === model.id && <b>Selected</b>}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {visibleModels.length > displayedModels.length && (
+                        <div className="model-result-limit" role="status">Showing the first {displayedModels.length} of {visibleModels.length} matches. Keep typing to narrow the list.</div>
+                      )}
+                      <label className="full-field manual-model-field">
+                        <span>Exact model ID</span>
+                        <input value={llmConfig.model} placeholder="Choose above or enter an ID manually" onChange={(event) => setLlmConfig((current) => ({ ...current, model: event.target.value }))} />
+                        <small>Manual entry remains available when an endpoint cannot list its models.</small>
+                      </label>
+                    </div>
                     <label className="full-field model-key-field">
                       <span>API key {selectedLlmProvider.keyRequired ? "(required)" : "(optional)"}</span>
                       <input type="password" autoComplete="off" required={selectedLlmProvider.keyRequired} aria-required={selectedLlmProvider.keyRequired} value={llmApiKey} placeholder={llmConfig.hasApiKey ? "A protected key is already saved" : selectedLlmProvider.keyRequired ? "Paste your OpenRouter API key" : "Leave blank when the endpoint needs no key"} onChange={(event) => { setLlmApiKey(event.target.value); setClearLlmApiKey(false); }} />

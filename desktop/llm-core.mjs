@@ -1,7 +1,9 @@
 const PROVIDERS = new Set(["ollama", "lmstudio", "openrouter", "openaiCompatible"]);
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const MAX_RESPONSE_BYTES = 2_000_000;
+const MAX_MODEL_CATALOG_BYTES = 8_000_000;
 const MAX_PROMPT_CHARS = 60_000;
+const MAX_LISTED_MODELS = 2_000;
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 export const PROVIDER_DEFAULTS = Object.freeze({
@@ -129,9 +131,9 @@ function endpointErrorMessage(status) {
   return `The model endpoint returned HTTP ${status}.`;
 }
 
-async function responseText(response) {
+async function responseText(response, maxBytes = MAX_RESPONSE_BYTES) {
   const advertised = Number(response.headers?.get?.("content-length") ?? 0);
-  if (advertised > MAX_RESPONSE_BYTES) throw new ConnectorError("response_too_large", "The model response was too large.");
+  if (advertised > maxBytes) throw new ConnectorError("response_too_large", "The model response was too large.");
   let text;
   if (response.body?.getReader) {
     const reader = response.body.getReader();
@@ -143,7 +145,7 @@ async function responseText(response) {
         const { done, value } = await reader.read();
         if (done) break;
         bytes += value.byteLength;
-        if (bytes > MAX_RESPONSE_BYTES) {
+        if (bytes > maxBytes) {
           await reader.cancel();
           throw new ConnectorError("response_too_large", "The model response was too large.");
         }
@@ -156,7 +158,7 @@ async function responseText(response) {
     }
   } else {
     text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > MAX_RESPONSE_BYTES) {
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
       throw new ConnectorError("response_too_large", "The model response was too large.");
     }
   }
@@ -166,7 +168,7 @@ async function responseText(response) {
   return text;
 }
 
-async function request(config, path, options, fetchImpl, timeoutMs) {
+async function request(config, path, options, fetchImpl, timeoutMs, maxResponseBytes = MAX_RESPONSE_BYTES) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -175,7 +177,7 @@ async function request(config, path, options, fetchImpl, timeoutMs) {
       redirect: "error",
       signal: controller.signal,
     });
-    return await responseText(response);
+    return await responseText(response, maxResponseBytes);
   } catch (error) {
     if (error instanceof ConnectorError) throw error;
     if (error?.name === "AbortError") throw new ConnectorError("timeout", "The model endpoint timed out.");
@@ -193,25 +195,43 @@ function parseJson(text, errorMessage = "The model endpoint returned invalid JSO
   }
 }
 
+function cleanModelText(value, maxLength = 300) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeListedModels(models, nativeOllama = false) {
+  const seen = new Set();
+  const normalized = [];
+  for (const model of models) {
+    const rawId = typeof model === "string"
+      ? model
+      : nativeOllama
+        ? model?.name ?? model?.model
+        : model?.id ?? model?.name;
+    const id = cleanModelText(rawId);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const rawName = typeof model === "string" ? model : model?.name ?? id;
+    normalized.push({ id, name: cleanModelText(rawName, 500) || id });
+    if (normalized.length >= MAX_LISTED_MODELS) break;
+  }
+  return normalized;
+}
+
 export async function listModels(configInput, { fetchImpl = fetch, timeoutMs = 15_000 } = {}) {
   const config = normalizeConfig(configInput);
   if (config.provider === "ollama") {
-    const payload = parseJson(await request(config, "api/tags", { method: "GET", headers: headersFor(config) }, fetchImpl, timeoutMs));
+    const payload = parseJson(await request(config, "api/tags", { method: "GET", headers: headersFor(config) }, fetchImpl, timeoutMs, MAX_MODEL_CATALOG_BYTES));
     const models = Array.isArray(payload?.models) ? payload.models : [];
-    return models
-      .map((model) => ({ id: String(model?.name ?? model?.model ?? "").trim(), name: String(model?.name ?? model?.model ?? "").trim() }))
-      .filter((model) => model.id)
-      .slice(0, 500);
+    return normalizeListedModels(models, true);
   }
-  const payload = parseJson(await request(config, "models", { method: "GET", headers: headersFor(config) }, fetchImpl, timeoutMs));
+  const payload = parseJson(await request(config, "models", { method: "GET", headers: headersFor(config) }, fetchImpl, timeoutMs, MAX_MODEL_CATALOG_BYTES));
   const models = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : [];
-  return models
-    .map((model) => {
-      const id = String(typeof model === "string" ? model : model?.id ?? model?.name ?? "").trim();
-      return { id, name: String(typeof model === "string" ? model : model?.name ?? id).trim() || id };
-    })
-    .filter((model) => model.id)
-    .slice(0, 500);
+  return normalizeListedModels(models);
 }
 
 export async function testConnection(configInput, options = {}) {
