@@ -1,6 +1,6 @@
 # Idea Foundry — Xahau + Evernode
 
-Idea Foundry is a local-first, optional-AI idea-generation and evidence-review workspace for Xahau and Evernode projects. It moves a founder from a broad search profile to falsifiable candidates, then calculates stage readiness with a locked 51-claim rubric.
+Idea Foundry is a local-first, optional-AI idea-generation and evidence-review workspace for Xahau and Evernode projects. It moves a founder from a broad search profile to falsifiable candidates, helps organize a review, then calculates stage readiness with a locked 51-claim rubric.
 
 No account or ChatGPT sign-in is required in the desktop edition.
 
@@ -36,7 +36,7 @@ The packaged desktop app runs locally and supports:
 - A user-selected OpenAI-compatible HTTP or HTTPS endpoint
 - API credentials encrypted through the operating system
 
-The renderer has no direct network authority. A narrow, isolated desktop bridge performs only five model operations: read configuration, save configuration, test the connection, list models, and generate an idea slate. Local providers are restricted to loopback addresses.
+The renderer has no direct network authority. A narrow, isolated desktop bridge handles configuration, connection testing, model discovery, idea generation, and the optional review assistants. Local providers are restricted to loopback addresses.
 
 To connect a model:
 
@@ -50,13 +50,24 @@ To connect a model:
 
 Every generated item is marked as an editable AI draft. It cannot write claims, evidence, grades, gates, caps, scores, or advancement results.
 
+## Optional AI-assisted review
+
+The two review assistants are available only in the desktop edition with a connected model. They work with local Ollama or LM Studio models and with cloud OpenRouter or OpenAI-compatible providers.
+
+- **Draft evaluation:** the model proposes merits and rationales for unanswered claims and can recommend gate outcomes. It applies nothing automatically, never supplies rubric weights, totals, or final scores, and cannot bypass validation. You choose which claim drafts to apply; gate proposals are reviewed and applied one at a time.
+- **Organize evidence:** paste the actual source material you already have, such as interview notes, test results, or a research excerpt. The model turns it into reviewable artifact proposals, and Idea Foundry locally confirms that every quoted excerpt exists in the pasted source before it can be approved. The model cannot create proof or verify its own output.
+- **Human control:** evidence at E2 or above still requires an explicit human verification action, reviewer name, and conflict disclosure. Applied changes have one-click undo.
+- **Local project data:** the full pasted source is not persisted. An approved artifact keeps only its excerpt, source fingerprint, and AI provenance so the review remains auditable.
+
+If you choose a cloud provider, the relevant idea, review context, or pasted evidence source is sent to that provider for the requested operation. Use Ollama or LM Studio when the material must remain on the device.
+
 ## Use the framework
 
 1. Select **Start a project**, **Personalize my ideas**, or **I already have an idea**.
 2. Generate ideas with a connected model, add your own, try the examples, or copy the prompt into any LLM.
 3. Choose one idea. Optional 0–100 exploration estimates only order the idea list; they are not validated scores.
-4. Open **Evaluate**, choose the target stage and archetype, and assess all 51 atomic claims with merit from 0–5.
-5. Open **Evidence**, attach proof, and assign E0–E4. The validator checks type ceilings, dates, verification, claim links, duplicates, and counterevidence.
+4. Open **Evaluate**, choose the target stage and archetype, and assess all 51 atomic claims with merit from 0–5. In the desktop app, you may ask the connected model to draft unanswered claim merits and gate recommendations, then approve only the useful proposals.
+5. Open **Evidence**, attach proof manually or use the desktop evidence organizer with pasted source text, and assign E0–E4. The validator checks type ceilings, dates, verification, claim links, duplicates, and counterevidence.
 6. Resolve the eight non-compensable gates.
 7. Open **Decision** to read the four separate outputs and every active cap, floor, validation error, and blocker.
 8. Use **Settings & data → Import & export** for a reproducible JSON packet or claim-level CSV.
@@ -80,9 +91,11 @@ Every generated item is marked as an editable AI draft. It cannot write claims, 
 - Private profile data is excluded from exports by default.
 - Computed fields in imported packets are ignored and recalculated locally.
 - API credentials are never stored in project JSON or browser storage.
+- Evaluation and evidence AI drafts remain staged until the user explicitly applies them; each application can be undone in one click.
+- The evidence organizer does not persist the full pasted source. Approved artifacts retain only the accepted excerpt, source fingerprint, and model provenance.
 - Ollama and LM Studio are forced to localhost in their named connector modes.
 - OpenRouter is pinned to its official HTTPS API URL so its key cannot be redirected to another host.
-- Choosing OpenRouter sends the displayed generation prompt to OpenRouter and the selected upstream model provider. Other remote compatible endpoints receive the same displayed prompt; the UI warns about these boundaries.
+- Choosing OpenRouter sends the displayed prompt and operation-specific context to OpenRouter and the selected upstream model provider. Other remote compatible endpoints receive the same material; the UI warns about these boundaries.
 - Do not enter wallet seeds, regulated personal data, or confidential evidence bodies.
 
 Clearing local data removes the active workspace from that application profile. Export important work first.
