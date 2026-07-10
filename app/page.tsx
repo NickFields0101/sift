@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+/* Brand images use native img elements so the same component bundles under Next.js and Electron's Vite renderer. */
+/* eslint-disable @next/next/no-img-element */
+
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ARCHETYPES,
   ENGINE_VERSION,
@@ -30,12 +33,24 @@ import {
 } from "./lib/scoring";
 import { searchLlmModels } from "./lib/model-search";
 import type {
+  ListModelsInput,
   LlmConfig,
   LlmConnectionOptions,
   LlmProvider,
   NormalizedGeneratedIdea,
   SaveLlmConfigInput,
 } from "./desktop-bridge";
+import brandIconAsset from "../public/brand/idea-foundry-icon.png";
+import brandLogoAsset from "../public/brand/idea-foundry-logo.png";
+import brandMarkAsset from "../public/brand/idea-foundry-mark-transparent.png";
+
+function staticAssetUrl(asset: string | { src: string }) {
+  return typeof asset === "string" ? asset : asset.src;
+}
+
+const BRAND_ICON_URL = staticAssetUrl(brandIconAsset);
+const BRAND_LOGO_URL = staticAssetUrl(brandLogoAsset);
+const BRAND_MARK_URL = staticAssetUrl(brandMarkAsset);
 
 type Section = "overview" | "ideas" | "profile" | "model" | "review" | "evidence" | "results" | "export";
 
@@ -105,7 +120,7 @@ const LLM_PROVIDERS: Record<LlmProvider, {
     label: "OpenRouter",
     defaultUrl: "https://openrouter.ai/api/v1",
     boundary: "Cloud endpoint. The displayed prompt is sent to OpenRouter and the selected model provider. An OpenRouter API key is required.",
-    location: "Cloud · API key",
+    location: "Cloud · easiest setup",
     remote: true,
     keyRequired: true,
     lockedEndpoint: true,
@@ -397,12 +412,17 @@ export default function Home() {
   const [llmModels, setLlmModels] = useState<Array<{ id: string; name: string }>>([]);
   const [modelSearch, setModelSearch] = useState("");
   const [modelListError, setModelListError] = useState("");
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelActiveIndex, setModelActiveIndex] = useState(0);
+  const [modelSearchBusy, setModelSearchBusy] = useState(false);
   const [llmBusy, setLlmBusy] = useState<"loading" | "saving" | "testing" | "models" | null>(null);
   const [llmMessage, setLlmMessage] = useState("");
   const [llmMessageTone, setLlmMessageTone] = useState<"neutral" | "success" | "error">("neutral");
   const [ideaCount, setIdeaCount] = useState(8);
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
   const [lastGeneration, setLastGeneration] = useState<{ provider: string; model: string; count: number } | null>(null);
+  const modelSearchTimerRef = useRef<number | null>(null);
+  const modelSearchRequestRef = useRef(0);
   const [evidenceDraft, setEvidenceDraft] = useState({
     title: "",
     claimId: "1A",
@@ -485,6 +505,15 @@ export default function Home() {
     return () => window.clearTimeout(timeout);
   }, [toast]);
 
+  useEffect(() => () => {
+    if (modelSearchTimerRef.current !== null) window.clearTimeout(modelSearchTimerRef.current);
+    modelSearchRequestRef.current += 1;
+  }, []);
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [section, state.started]);
+
   const score = useMemo(() => scoreReview(state.review), [state.review]);
   const profileErrors = useMemo(() => validateGenerationProfile(state.profile), [state.profile]);
   const selectedIdea = state.ideas.find((idea) => idea.id === state.project.selectedIdeaId);
@@ -519,7 +548,7 @@ export default function Home() {
   const visibleModels = useMemo(() => {
     return searchLlmModels(llmModels, modelSearch, [LLM_PROVIDERS[llmConfig.provider].label, llmConfig.provider]);
   }, [llmConfig.provider, llmModels, modelSearch]);
-  const displayedModels = useMemo(() => visibleModels.slice(0, 60), [visibleModels]);
+  const displayedModels = useMemo(() => visibleModels.slice(0, 10), [visibleModels]);
 
   function updateReview(patch: Partial<ReviewInput>) {
     setState((current) => ({ ...current, review: { ...current.review, ...patch } }));
@@ -542,6 +571,12 @@ export default function Home() {
   function start(mode: "neutral" | "private") {
     setState((current) => ({ ...current, started: true, profile: emptyProfile(mode) }));
     setSection(mode === "private" ? "profile" : "overview");
+  }
+
+  function startWithIdea() {
+    start("neutral");
+    addIdea();
+    setSection("ideas");
   }
 
   function addIdea() {
@@ -590,11 +625,11 @@ export default function Home() {
     };
   }
 
-  async function saveLlmSettings() {
+  async function connectLlm() {
     const bridge = window.ideaFoundry;
     if (!bridge?.desktop) throw new Error("The model connector is available in the desktop app.");
     setLlmBusy("saving");
-    setLlmMessage("Saving this connector on your computer…");
+    setLlmMessage("Saving and checking this connection…");
     setLlmMessageTone("neutral");
     try {
       const saved = await bridge.llm.saveConfig(currentLlmInput());
@@ -602,64 +637,118 @@ export default function Home() {
       setLlmConfig(normalized);
       setLlmApiKey("");
       setClearLlmApiKey(false);
-      setLlmMessage("Connector saved locally. API credentials are protected by the operating system.");
-      setLlmMessageTone("success");
-      return normalized;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not save the connector.";
-      setLlmMessage(message);
-      setLlmMessageTone("error");
-      throw error;
-    } finally {
-      setLlmBusy(null);
-    }
-  }
-
-  async function testLlmConnection() {
-    const bridge = window.ideaFoundry;
-    if (!bridge?.desktop) return;
-    setLlmBusy("testing");
-    setLlmMessage("Testing the endpoint without sending project data…");
-    setLlmMessageTone("neutral");
-    try {
-      const result = await bridge.llm.testConnection(currentLlmInput() as LlmConnectionOptions);
-      setLlmMessage(result.message || (result.ok ? "Connection succeeded." : "Connection failed."));
+      const result = await bridge.llm.testConnection(normalized as LlmConnectionOptions);
+      setLlmMessage(result.ok ? `${result.message || "Connection succeeded."} Settings were saved on this computer.` : result.message || "The settings were saved, but the connection failed.");
       setLlmMessageTone(result.ok ? "success" : "error");
     } catch (error) {
-      setLlmMessage(error instanceof Error ? error.message : "Connection failed.");
+      const message = error instanceof Error ? error.message : "Could not connect to this model.";
+      setLlmMessage(message);
       setLlmMessageTone("error");
     } finally {
       setLlmBusy(null);
     }
   }
 
-  async function refreshLlmModels() {
+  async function loadLlmModels({ query = "", background = false, apiKeyOverride }: { query?: string; background?: boolean; apiKeyOverride?: string } = {}) {
     const bridge = window.ideaFoundry;
     if (!bridge?.desktop) return;
-    setLlmBusy("models");
+    const requestId = ++modelSearchRequestRef.current;
+    if (background) setModelSearchBusy(true);
+    else setLlmBusy("models");
     setModelListError("");
-    setLlmMessage("Reading the models exposed by this endpoint…");
-    setLlmMessageTone("neutral");
+    if (!background) {
+      setLlmMessage("Reading the models exposed by this endpoint…");
+      setLlmMessageTone("neutral");
+    }
     try {
-      const models = await bridge.llm.listModels(currentLlmInput() as LlmConnectionOptions);
+      const baseInput = currentLlmInput();
+      const input: ListModelsInput = {
+        ...baseInput,
+        ...(apiKeyOverride?.trim() ? { apiKey: apiKeyOverride.trim(), clearApiKey: false } : {}),
+        ...(query.trim() ? { query: query.trim() } : {}),
+      };
+      const models = await bridge.llm.listModels(input);
+      if (requestId !== modelSearchRequestRef.current) return;
       setLlmModels(models);
-      if (models.length === 0) {
-        setModelListError("The endpoint responded, but reported no models. You can still enter an exact model ID manually.");
-      }
+      setModelActiveIndex(0);
+      setModelPickerOpen(true);
       if (!llmConfig.model && models.length === 1) {
         setLlmConfig((current) => ({ ...current, model: models[0].id }));
       }
-      setLlmMessage(models.length ? `${models.length} model${models.length === 1 ? "" : "s"} available.` : "The endpoint returned no models.");
-      setLlmMessageTone(models.length ? "success" : "error");
+      if (!background) {
+        setLlmMessage(models.length ? `${models.length} model${models.length === 1 ? "" : "s"} available.` : "The endpoint returned no models.");
+        setLlmMessageTone(models.length ? "success" : "error");
+      }
     } catch (error) {
+      if (requestId !== modelSearchRequestRef.current) return;
       setLlmModels([]);
       const message = error instanceof Error ? error.message : "Could not list models.";
       setModelListError(message);
-      setLlmMessage(message);
-      setLlmMessageTone("error");
+      if (!background) {
+        setLlmMessage(message);
+        setLlmMessageTone("error");
+      }
     } finally {
-      setLlmBusy(null);
+      if (requestId === modelSearchRequestRef.current) {
+        if (background) setModelSearchBusy(false);
+        else setLlmBusy(null);
+      }
     }
+  }
+
+  function refreshLlmModels() {
+    void loadLlmModels();
+  }
+
+  function queueModelSearch(value: string, apiKeyOverride = llmApiKey) {
+    setModelSearch(value);
+    setModelPickerOpen(true);
+    setModelActiveIndex(0);
+    setModelListError("");
+    if (modelSearchTimerRef.current !== null) window.clearTimeout(modelSearchTimerRef.current);
+    modelSearchRequestRef.current += 1;
+
+    if (llmConfig.provider !== "openrouter") {
+      if (llmModels.length === 0 && !modelSearchBusy) void loadLlmModels({ background: true });
+      return;
+    }
+
+    if (!value.trim()) {
+      setLlmModels([]);
+      setModelSearchBusy(false);
+      return;
+    }
+    if (!(apiKeyOverride.trim() || (llmConfig.hasApiKey && !clearLlmApiKey))) {
+      setLlmModels([]);
+      setModelSearchBusy(false);
+      setModelListError("Enter your OpenRouter API key first, then type a model name or version.");
+      return;
+    }
+
+    setLlmModels([]);
+    setModelSearchBusy(true);
+    modelSearchTimerRef.current = window.setTimeout(() => {
+      void loadLlmModels({ query: value, background: true, apiKeyOverride });
+    }, 250);
+  }
+
+  function openModelPicker() {
+    setModelPickerOpen(true);
+    if (llmConfig.provider === "openrouter") {
+      if (modelSearch.trim()) queueModelSearch(modelSearch);
+      return;
+    }
+    if (llmModels.length === 0 && !modelSearchBusy) void loadLlmModels({ background: true });
+  }
+
+  function selectLlmModel(model: { id: string; name: string }) {
+    if (modelSearchTimerRef.current !== null) window.clearTimeout(modelSearchTimerRef.current);
+    modelSearchRequestRef.current += 1;
+    setLlmConfig((current) => ({ ...current, model: model.id }));
+    setModelSearch(model.name || model.id);
+    setModelSearchBusy(false);
+    setModelPickerOpen(false);
+    setModelActiveIndex(0);
   }
 
   async function generateWithConnectedLlm() {
@@ -857,10 +946,11 @@ export default function Home() {
           <div className="hero-copy">
             <p className="eyebrow">Xahau + Evernode idea validation</p>
             <h1>Find the idea worth disproving.</h1>
-            <p className="hero-lede">Generate a focused slate, test 51 weighted claims, and see what the evidence actually supports.</p>
+            <p className="hero-lede">Turn a blank page into useful ideas, choose one, and see what real evidence actually supports.</p>
             <div className="hero-actions">
-              <button className="button primary" onClick={() => start("neutral")}>Start profile-neutral <span aria-hidden="true">→</span></button>
-              <button className="button secondary" onClick={() => start("private")}>Build a private profile</button>
+              <button className="button primary" onClick={() => start("neutral")}>Start a project <span aria-hidden="true">→</span></button>
+              <button className="button secondary" onClick={() => start("private")}>Personalize my ideas</button>
+              <button className="button ghost" onClick={startWithIdea}>I already have an idea</button>
             </div>
             <p className="trust-line">No account · Saved on this device · Nothing is shared automatically</p>
             <div className="method-strip" aria-label="Method">
@@ -870,6 +960,7 @@ export default function Home() {
             </div>
           </div>
           <aside className="specimen" aria-label="Illustrative result specimen">
+            <img className="specimen-mark" src={BRAND_MARK_URL} alt="" aria-hidden="true" />
             <div className="specimen-head"><span>Review specimen</span><span className="provisional-dot">Illustrative</span></div>
             <div className="specimen-score"><span>Evidence-adjusted</span><strong>64.5</strong><small>/ 100</small></div>
             <div className="paired-bar"><i style={{ width: "82%" }} /><b style={{ width: "64.5%" }} /></div>
@@ -887,15 +978,17 @@ export default function Home() {
     );
   }
 
-  const navigation: Array<{ id: Section; label: string; meta?: string }> = [
-    { id: "overview", label: "Overview" },
+  const primaryNavigation: Array<{ id: Section; label: string; meta?: string }> = [
+    { id: "overview", label: "Home" },
     { id: "ideas", label: "Ideas", meta: String(state.ideas.length) },
-    { id: "profile", label: "Profile", meta: state.profile.mode === "private" ? (profileErrors.length ? "!" : "P") : "N" },
-    { id: "model", label: "LLM", meta: desktopAvailable && llmReady ? "✓" : "—" },
-    { id: "review", label: "Review", meta: `${score.assessedClaims}/${score.totalClaims}` },
+    { id: "review", label: "Evaluate", meta: `${score.assessedClaims}/${score.totalClaims}` },
     { id: "evidence", label: "Evidence", meta: String(state.review.artifacts.length) },
-    { id: "results", label: "Results", meta: score.numericEligible && score.gateEligible ? "✓" : "!" },
-    { id: "export", label: "Export" },
+    { id: "results", label: "Decision", meta: score.numericEligible && score.gateEligible ? "✓" : "!" },
+  ];
+  const utilityNavigation: Array<{ id: Section; label: string; meta?: string }> = [
+    { id: "profile", label: "Personalize ideas", meta: state.profile.mode === "private" ? (profileErrors.length ? "!" : "P") : "N" },
+    { id: "model", label: "AI model", meta: desktopAvailable && llmReady ? "✓" : "—" },
+    { id: "export", label: "Import & export" },
   ];
 
   return (
@@ -915,7 +1008,7 @@ export default function Home() {
 
       <aside className="side-rail">
         <nav aria-label="Workspace">
-          {navigation.map((item) => (
+          {primaryNavigation.map((item) => (
             <button key={item.id} className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}>
               <span className="nav-mark" aria-hidden="true" />
               <span>{item.label}</span>
@@ -923,6 +1016,18 @@ export default function Home() {
             </button>
           ))}
         </nav>
+        <details className="rail-tools" open={utilityNavigation.some((item) => item.id === section) || undefined}>
+          <summary>Settings & data</summary>
+          <nav aria-label="Settings and data">
+            {utilityNavigation.map((item) => (
+              <button key={item.id} className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}>
+                <span className="nav-mark" aria-hidden="true" />
+                <span>{item.label}</span>
+                {item.meta && <small>{item.meta}</small>}
+              </button>
+            ))}
+          </nav>
+        </details>
         <div className="rail-footer">
           <div><span>Privacy</span><strong>{state.profile.mode === "private" ? "Private profile" : "Profile-neutral"}</strong></div>
           <div><span>Rubric</span><strong>v3 · 51 claims</strong></div>
@@ -949,26 +1054,36 @@ export default function Home() {
 
         {section === "ideas" && (
           <div className="page-section">
-            <PageHeading eyebrow="Exploration workspace" title="Generate candidates before you defend one." description="Idea priority is a search heuristic. It never changes the objective 51-claim score." />
-            <div className="notice neutral"><strong>Profile boundary</strong><span>{state.profile.mode === "private" ? "Your private profile changes ranking only—not evidence, gates, weights, or readiness." : "Neutral mode ignores personal fit and ranks only opportunity, protocol affordance, and experimentability."}</span></div>
-            <div className="idea-toolbar">
-              <button className="button primary" disabled={generatingIdeas} onClick={generateWithConnectedLlm}>
-                {generatingIdeas ? "Generating hypotheses…" : "Generate with connected LLM"}
-              </button>
-              <button className="button primary" onClick={loadStarterSlate}>Load editable starter slate</button>
-              <button className="button secondary" onClick={addIdea}>Add idea manually</button>
-              <button className="button ghost" onClick={() => copyText(prompt, "LLM prompt copied")}>Copy generation prompt</button>
+            <PageHeading eyebrow="Ideas" title="Find a useful idea to test." description="Generate a slate, try examples, or add your own. You can edit everything before choosing one to evaluate." />
+            <div className="idea-start-card">
+              <div>
+                <p className="eyebrow">Choose a starting point</p>
+                <h2>{desktopAvailable && llmReady ? "Generate a fresh idea slate" : "How would you like to begin?"}</h2>
+                <p>{state.profile.mode === "private" ? "Your private profile shapes idea ranking only. It never changes evidence or the final score." : "Start neutral now. Personalization is optional and never changes the evidence score."}</p>
+              </div>
+              <div className="idea-start-actions">
+                {desktopAvailable && llmReady ? (
+                  <button className="button primary" disabled={generatingIdeas} onClick={generateWithConnectedLlm}>{generatingIdeas ? "Generating ideas…" : `Generate ${ideaCount} ideas`}</button>
+                ) : desktopAvailable ? (
+                  <button className="button primary" onClick={() => setSection("model")}>Connect an AI model</button>
+                ) : (
+                  <button className="button primary" onClick={() => copyText(prompt, "LLM prompt copied")}>Copy prompt for my LLM</button>
+                )}
+                <button className="button secondary" onClick={loadStarterSlate}>Try 4 examples</button>
+                <button className="button ghost" onClick={addIdea}>Add my own idea</button>
+              </div>
             </div>
             <div className="generation-status">
               <span className={desktopAvailable && llmReady ? "connected" : "disconnected"} aria-hidden="true" />
-              <strong>{desktopAvailable && llmReady ? `${LLM_PROVIDERS[llmConfig.provider].label} · ${llmConfig.model}` : "No model selected"}</strong>
-              <button className="text-button" onClick={() => setSection("model")}>Connector settings →</button>
+              <strong>{desktopAvailable && llmReady ? `${LLM_PROVIDERS[llmConfig.provider].label} · ${llmConfig.model}` : desktopAvailable ? "AI model is optional" : "Use any LLM with the prompt below"}</strong>
+              <button className="text-button" onClick={() => setSection("model")}>{desktopAvailable && llmReady ? "Change model" : "AI model settings"} →</button>
               {lastGeneration && <small>Last slate: {lastGeneration.count} ideas from {lastGeneration.model}</small>}
             </div>
             <details className="prompt-panel">
-              <summary>Use with any LLM</summary>
-              <p>The LLM proposes hypotheses. This app remains the only calculator.</p>
+              <summary>Use the prompt with any LLM</summary>
+              <p>Copy this if you prefer another AI tool. The model only proposes editable ideas; Idea Foundry remains the calculator.</p>
               <textarea readOnly value={prompt} rows={9} aria-label="Idea generation prompt" />
+              <button className="button small secondary" onClick={() => copyText(prompt, "LLM prompt copied")}>Copy prompt</button>
             </details>
             {sortedIdeas.length === 0 ? (
               <EmptyState number="00" title="No candidates yet" text="Load four falsifiable examples, add your own, or copy the profile-aware prompt into your preferred LLM." />
@@ -989,22 +1104,27 @@ export default function Home() {
                         <textarea value={idea.concept} rows={2} placeholder="One-sentence concept" onChange={(event) => updateIdea(idea.id, { concept: event.target.value })} />
                         <div className="idea-facts">
                           <LabeledInput label="User" value={idea.user} onChange={(value) => updateIdea(idea.id, { user: value })} />
-                          <LabeledInput label="Buyer" value={idea.buyer} onChange={(value) => updateIdea(idea.id, { buyer: value })} />
-                          <LabeledInput label="Current alternative" value={idea.currentAlternative} onChange={(value) => updateIdea(idea.id, { currentAlternative: value })} />
-                          <LabeledInput label="Critical assumption" value={idea.criticalAssumption} onChange={(value) => updateIdea(idea.id, { criticalAssumption: value })} />
+                          <LabeledInput label="What must be true" value={idea.criticalAssumption} onChange={(value) => updateIdea(idea.id, { criticalAssumption: value })} />
                         </div>
-                        <LabeledInput label="14-day falsification experiment" value={idea.experiment} onChange={(value) => updateIdea(idea.id, { experiment: value })} />
-                        <div className="score-sliders">
-                          {(Object.keys(idea.scores) as Array<keyof GenerationComponentScores>).map((key) => (
-                            <label key={key} className={key === "personalFit" && state.profile.mode === "neutral" ? "disabled" : ""}>
-                              <span>{key.replace(/([A-Z])/g, " $1")} <b>{idea.scores[key]}</b></span>
-                              <input type="range" min="0" max="100" value={idea.scores[key]} disabled={key === "personalFit" && state.profile.mode === "neutral"} onChange={(event) => updateIdea(idea.id, { scores: { ...idea.scores, [key]: Number(event.target.value) } })} />
-                            </label>
-                          ))}
-                        </div>
+                        <LabeledInput label="First 14-day test" value={idea.experiment} onChange={(value) => updateIdea(idea.id, { experiment: value })} />
+                        <details className="candidate-details">
+                          <summary>More details & ranking</summary>
+                          <div className="idea-facts">
+                            <LabeledInput label="Likely buyer" value={idea.buyer} onChange={(value) => updateIdea(idea.id, { buyer: value })} />
+                            <LabeledInput label="What they use today" value={idea.currentAlternative} onChange={(value) => updateIdea(idea.id, { currentAlternative: value })} />
+                          </div>
+                          <div className="score-sliders">
+                            {(Object.keys(idea.scores) as Array<keyof GenerationComponentScores>).map((key) => (
+                              <label key={key} className={key === "personalFit" && state.profile.mode === "neutral" ? "disabled" : ""}>
+                                <span>{key.replace(/([A-Z])/g, " $1")} <b>{idea.scores[key]}</b></span>
+                                <input type="range" min="0" max="100" value={idea.scores[key]} disabled={key === "personalFit" && state.profile.mode === "neutral"} onChange={(event) => updateIdea(idea.id, { scores: { ...idea.scores, [key]: Number(event.target.value) } })} />
+                              </label>
+                            ))}
+                          </div>
+                        </details>
                         <div className="idea-actions">
-                          <span>Exploration only · not validated{idea.source ? ` · AI draft from ${idea.source.model}` : ""}</span>
-                          <button className="button small primary" onClick={() => beginReview(idea)}>Start 51-claim review</button>
+                          <span>Idea ranking only{idea.source ? ` · AI draft from ${idea.source.model}` : ""}</span>
+                          <button className="button small primary" onClick={() => beginReview(idea)}>Evaluate this idea</button>
                         </div>
                       </div>
                     </article>
@@ -1017,7 +1137,7 @@ export default function Home() {
 
         {section === "model" && (
           <div className="page-section narrow">
-            <PageHeading eyebrow="Optional model intelligence" title="Connect a model without surrendering the calculator." description="Your model may propose hypotheses. Only confirmed human inputs enter the deterministic evidence review." />
+            <PageHeading eyebrow="AI model" title="Connect the model you want to use." description="OpenRouter is the quickest cloud option. Ollama and LM Studio keep prompts on your computer. No ChatGPT sign-in is required." />
             {desktopAvailable === false ? (
               <section className="desktop-required-card">
                 <span className="desktop-required-mark">DESKTOP</span>
@@ -1028,28 +1148,31 @@ export default function Home() {
               </section>
             ) : (
               <>
-                <div className="model-boundary-grid">
-                  <article><span>01</span><strong>Model proposes</strong><p>Ideas, assumptions, interview questions, and experiments enter as editable hypotheses.</p></article>
-                  <article><span>02</span><strong>You confirm</strong><p>No model output becomes evidence, a grade, or a gate decision automatically.</p></article>
-                  <article><span>03</span><strong>Engine calculates</strong><p>The locked 51-claim rules engine remains provider-independent and deterministic.</p></article>
+                <div className="model-safety-strip">
+                  <img src={BRAND_ICON_URL} alt="" aria-hidden="true" />
+                  <div><strong>Your model suggests. You decide.</strong><span>AI output stays editable and never becomes evidence or a score automatically.</span></div>
                 </div>
 
                 <section className="form-card model-config-card">
                   <div className="form-card-head">
-                    <div><h3>Model endpoint</h3><p>{desktopVersion ? `Desktop ${desktopVersion} · ` : ""}Stored only on this computer</p></div>
+                    <div><h3>Connection</h3><p>{desktopVersion ? `Desktop ${desktopVersion} · ` : ""}Settings stay on this computer</p></div>
                     <span className={`connector-state ${llmReady ? "ready" : "idle"}`}>{llmReady ? "Configured" : "Not configured"}</span>
                   </div>
                   <div className="provider-picker" role="group" aria-label="LLM provider">
-                    {(Object.keys(LLM_PROVIDERS) as LlmProvider[]).map((provider) => (
+                    {(["openrouter", "ollama", "lmstudio", "openaiCompatible"] as LlmProvider[]).map((provider) => (
                       <button
                         key={provider}
                         className={llmConfig.provider === provider ? "active" : ""}
                         onClick={() => {
+                          if (modelSearchTimerRef.current !== null) window.clearTimeout(modelSearchTimerRef.current);
+                          modelSearchRequestRef.current += 1;
                           setLlmConfig({ provider, baseUrl: LLM_PROVIDERS[provider].defaultUrl, model: "", hasApiKey: false });
                           setLlmApiKey("");
                           setClearLlmApiKey(false);
                           setLlmModels([]);
                           setModelSearch("");
+                          setModelSearchBusy(false);
+                          setModelPickerOpen(false);
                           setModelListError("");
                           setLlmMessage("");
                         }}
@@ -1060,113 +1183,133 @@ export default function Home() {
                     ))}
                   </div>
                   <div className={`endpoint-boundary ${selectedLlmProvider.remote ? "remote-warning" : "local"}`}>
-                    <strong>{selectedLlmProvider.remote ? "Cloud boundary" : "Local endpoint"}</strong>
+                    <strong>{selectedLlmProvider.remote ? "Cloud" : "Local"}</strong>
                     <span>{selectedLlmProvider.boundary}</span>
                   </div>
-                  <div className="model-field-grid">
-                    <label className="full-field">
-                      <span>Base URL</span>
-                      <input value={llmConfig.baseUrl} spellCheck={false} readOnly={selectedLlmProvider.lockedEndpoint} aria-readonly={selectedLlmProvider.lockedEndpoint} onChange={(event) => setLlmConfig((current) => ({ ...current, baseUrl: event.target.value }))} />
+                  <div className="model-simple-fields">
+                    <label className="full-field model-key-field">
+                      <span>API key {selectedLlmProvider.keyRequired ? "(required)" : "(optional)"}</span>
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        required={selectedLlmProvider.keyRequired}
+                        aria-required={selectedLlmProvider.keyRequired}
+                        value={llmApiKey}
+                        placeholder={llmConfig.hasApiKey ? "A protected key is already saved" : selectedLlmProvider.keyRequired ? "Paste your OpenRouter API key" : "Leave blank if this endpoint needs no key"}
+                        onChange={(event) => {
+                          const nextKey = event.target.value;
+                          setLlmApiKey(nextKey);
+                          setClearLlmApiKey(false);
+                          if (llmConfig.provider === "openrouter" && modelSearch.trim()) queueModelSearch(modelSearch, nextKey);
+                        }}
+                      />
+                      <small>{llmConfig.provider === "openrouter" ? "Protected by your operating system; never written to projects, exports, or browser storage." : "Never written to project files or browser storage."}</small>
                     </label>
                     <div className="model-picker-field">
                       <label className="full-field">
-                        <span>Search available models</span>
+                        <span>Find a model</span>
                         <input
                           role="combobox"
                           aria-controls="available-llm-models"
-                          aria-expanded={visibleModels.length > 0}
+                          aria-expanded={modelPickerOpen}
                           aria-autocomplete="list"
+                          aria-activedescendant={modelPickerOpen && displayedModels[modelActiveIndex] ? `model-option-${modelActiveIndex}` : undefined}
                           value={modelSearch}
-                          placeholder="Try 4.8, Opus, Llama, or a model ID"
-                          onChange={(event) => setModelSearch(event.target.value)}
+                          placeholder={llmConfig.provider === "openrouter" ? "Type 4.8, Opus, Sonnet, Llama…" : "Type a name, version, or model ID"}
+                          onFocus={openModelPicker}
+                          onChange={(event) => {
+                            setLlmConfig((current) => ({ ...current, model: "" }));
+                            queueModelSearch(event.target.value);
+                          }}
                           onKeyDown={(event) => {
-                            if (event.key === "ArrowDown" && visibleModels.length > 0) {
+                            if (event.key === "ArrowDown" && displayedModels.length > 0) {
                               event.preventDefault();
-                              document.getElementById("model-option-0")?.focus();
+                              setModelPickerOpen(true);
+                              setModelActiveIndex((current) => Math.min(current + 1, displayedModels.length - 1));
                             }
-                            if (event.key === "Enter" && visibleModels.length > 0) {
+                            if (event.key === "ArrowUp" && displayedModels.length > 0) {
                               event.preventDefault();
-                              setLlmConfig((current) => ({ ...current, model: visibleModels[0].id }));
+                              setModelActiveIndex((current) => Math.max(current - 1, 0));
+                            }
+                            if (event.key === "Enter" && displayedModels[modelActiveIndex]) {
+                              event.preventDefault();
+                              selectLlmModel(displayedModels[modelActiveIndex]);
+                            }
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              setModelPickerOpen(false);
                             }
                           }}
                         />
                       </label>
-                      {llmBusy === "models" ? (
-                        <div className="model-list-state" role="status">Loading models from {selectedLlmProvider.label}…</div>
-                      ) : modelListError ? (
-                        <div className="model-list-state error" role="status">{modelListError}</div>
-                      ) : llmModels.length === 0 ? (
-                        <div className="model-list-state">No catalog loaded. Refresh models or use the exact model ID field.</div>
-                      ) : visibleModels.length === 0 ? (
-                        <div className="model-list-state">No model matches “{modelSearch}”. Search checks model names, IDs, and provider.</div>
-                      ) : (
-                        <div className="model-options" id="available-llm-models" role="listbox" aria-label="Available models">
-                          {displayedModels.map((model, index) => (
-                            <button
-                              id={`model-option-${index}`}
-                              role="option"
-                              aria-selected={llmConfig.model === model.id}
-                              className={llmConfig.model === model.id ? "selected" : ""}
-                              key={model.id}
-                              onClick={() => setLlmConfig((current) => ({ ...current, model: model.id }))}
-                              onKeyDown={(event) => {
-                                if (event.key === "ArrowDown") {
-                                  event.preventDefault();
-                                  document.getElementById(`model-option-${Math.min(index + 1, displayedModels.length - 1)}`)?.focus();
-                                }
-                                if (event.key === "ArrowUp") {
-                                  event.preventDefault();
-                                  if (index === 0) {
-                                    (event.currentTarget.closest(".model-picker-field")?.querySelector('[role="combobox"]') as HTMLElement | null)?.focus();
-                                  } else {
-                                    document.getElementById(`model-option-${index - 1}`)?.focus();
-                                  }
-                                }
-                                if (event.key === "Escape") {
-                                  (event.currentTarget.closest(".model-picker-field")?.querySelector('[role="combobox"]') as HTMLElement | null)?.focus();
-                                }
-                              }}
-                            >
-                              <span><strong>{model.name || model.id}</strong><small>{model.id}</small></span>
-                              {llmConfig.model === model.id && <b>Selected</b>}
-                            </button>
-                          ))}
+                      {modelPickerOpen && (
+                        <div className="model-popover" id="available-llm-models" role="listbox" aria-label="Available models" aria-busy={modelSearchBusy || llmBusy === "models"}>
+                          {modelSearchBusy || llmBusy === "models" ? (
+                            <div className="model-list-state" role="status">Searching {selectedLlmProvider.label}…</div>
+                          ) : modelListError ? (
+                            <div className="model-list-state error" role="status">{modelListError}</div>
+                          ) : llmConfig.provider === "openrouter" && !modelSearch.trim() ? (
+                            <div className="model-list-state">Start typing a model name or version. For example: <strong>4.8</strong>, <strong>Opus</strong>, or <strong>Llama</strong>.</div>
+                          ) : displayedModels.length === 0 ? (
+                            <div className="model-list-state">No model matches “{modelSearch}”. Try another name, version, or exact ID.</div>
+                          ) : (
+                            <div className="model-options">
+                              {displayedModels.map((model, index) => (
+                                <button
+                                  id={`model-option-${index}`}
+                                  role="option"
+                                  tabIndex={-1}
+                                  aria-selected={llmConfig.model === model.id}
+                                  className={`${llmConfig.model === model.id ? "selected" : ""} ${modelActiveIndex === index ? "active" : ""}`}
+                                  key={model.id}
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onMouseEnter={() => setModelActiveIndex(index)}
+                                  onClick={() => selectLlmModel(model)}
+                                >
+                                  <span><strong>{model.name || model.id}</strong><small>{model.id}</small></span>
+                                  {llmConfig.model === model.id && <b>Selected</b>}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {visibleModels.length > displayedModels.length && <div className="model-result-limit">Showing the best {displayedModels.length} matches. Keep typing to narrow the list.</div>}
                         </div>
                       )}
-                      {visibleModels.length > displayedModels.length && (
-                        <div className="model-result-limit" role="status">Showing the first {displayedModels.length} of {visibleModels.length} matches. Keep typing to narrow the list.</div>
-                      )}
-                      <label className="full-field manual-model-field">
-                        <span>Exact model ID</span>
-                        <input value={llmConfig.model} placeholder="Choose above or enter an ID manually" onChange={(event) => setLlmConfig((current) => ({ ...current, model: event.target.value }))} />
-                        <small>Manual entry remains available when an endpoint cannot list its models.</small>
-                      </label>
+                      {llmConfig.model && <div className="selected-model"><span>Selected</span><strong>{llmConfig.model}</strong><button aria-label="Clear selected model" onClick={() => { setLlmConfig((current) => ({ ...current, model: "" })); setModelSearch(""); setModelPickerOpen(true); }}>×</button></div>}
                     </div>
-                    <label className="full-field model-key-field">
-                      <span>API key {selectedLlmProvider.keyRequired ? "(required)" : "(optional)"}</span>
-                      <input type="password" autoComplete="off" required={selectedLlmProvider.keyRequired} aria-required={selectedLlmProvider.keyRequired} value={llmApiKey} placeholder={llmConfig.hasApiKey ? "A protected key is already saved" : selectedLlmProvider.keyRequired ? "Paste your OpenRouter API key" : "Leave blank when the endpoint needs no key"} onChange={(event) => { setLlmApiKey(event.target.value); setClearLlmApiKey(false); }} />
-                      <small>{llmConfig.provider === "openrouter" ? "Stored with operating-system encryption; never written to projects, exports, or browser storage." : "Never written to project files or browser storage."}</small>
-                    </label>
                     <label className="idea-count-field">
-                      <span>Ideas per slate</span>
+                      <span>Ideas to generate</span>
                       <input type="number" min="1" max="12" value={ideaCount} onChange={(event) => setIdeaCount(Math.max(1, Math.min(12, Number(event.target.value) || 1)))} />
                     </label>
                   </div>
-                  {llmConfig.hasApiKey && (selectedLlmProvider.keyRequired ? (
-                    <p className="required-key-note">To remove this required key, choose another provider and save it. Paste a new key above to replace it.</p>
-                  ) : (
-                    <label className="check-field clear-key-field"><input type="checkbox" checked={clearLlmApiKey} onChange={(event) => setClearLlmApiKey(event.target.checked)} /><span>Remove the saved API key</span></label>
-                  ))}
+                  <details className="model-advanced">
+                    <summary>Advanced settings</summary>
+                    <div className="model-field-grid">
+                      <label className="full-field">
+                        <span>Base URL</span>
+                        <input value={llmConfig.baseUrl} spellCheck={false} readOnly={selectedLlmProvider.lockedEndpoint} aria-readonly={selectedLlmProvider.lockedEndpoint} onChange={(event) => setLlmConfig((current) => ({ ...current, baseUrl: event.target.value }))} />
+                      </label>
+                      <label className="full-field manual-model-field">
+                        <span>Exact model ID</span>
+                        <input value={llmConfig.model} placeholder="Choose above or enter an ID manually" onChange={(event) => { setLlmConfig((current) => ({ ...current, model: event.target.value })); setModelSearch(event.target.value); }} />
+                        <small>Use this when an endpoint cannot list its models.</small>
+                      </label>
+                    </div>
+                    {llmConfig.hasApiKey && (selectedLlmProvider.keyRequired ? (
+                      <p className="required-key-note">Paste a new key above to replace the protected key already saved on this computer.</p>
+                    ) : (
+                      <label className="check-field clear-key-field"><input type="checkbox" checked={clearLlmApiKey} onChange={(event) => setClearLlmApiKey(event.target.checked)} /><span>Remove the saved API key</span></label>
+                    ))}
+                  </details>
                   <div className="model-actions">
-                    <button className="button secondary" disabled={llmBusy !== null} onClick={refreshLlmModels}>{llmBusy === "models" ? "Reading models…" : "Refresh models"}</button>
-                    <button className="button secondary" disabled={llmBusy !== null} onClick={testLlmConnection}>{llmBusy === "testing" ? "Testing…" : "Test connection"}</button>
-                    <button className="button primary" disabled={llmBusy !== null} onClick={() => void saveLlmSettings()}>{llmBusy === "saving" ? "Saving…" : "Save locally"}</button>
+                    <button className="button secondary" disabled={llmBusy !== null || modelSearchBusy} onClick={refreshLlmModels}>{llmBusy === "models" ? "Reading models…" : "Browse all models"}</button>
+                    <button className="button primary" disabled={llmBusy !== null || !llmReady} onClick={() => void connectLlm()}>{llmBusy === "saving" ? "Connecting…" : "Save & connect"}</button>
                   </div>
                   {llmMessage && <div className={`connector-message ${llmMessageTone}`} role="status">{llmMessage}</div>}
                 </section>
 
                 <section className="model-generation-card">
-                  <div><p className="eyebrow">Ready when you are</p><h2>Generate an editable hypothesis slate</h2><p>The current profile and domain boundary will be included. With a remote endpoint, that selected context leaves this computer.</p></div>
+                  <div><p className="eyebrow">Next step</p><h2>Generate an editable idea slate</h2><p>Your project boundary and optional profile are included. Cloud providers receive that selected context.</p></div>
                   <button className="button primary" disabled={generatingIdeas || !llmReady} onClick={generateWithConnectedLlm}>{generatingIdeas ? "Generating…" : `Generate ${ideaCount} ideas`}</button>
                 </section>
               </>
@@ -1176,10 +1319,10 @@ export default function Home() {
 
         {section === "profile" && (
           <div className="page-section narrow">
-            <PageHeading eyebrow="Private ranking layer" title="Shape the search without contaminating the score." description="Your profile affects candidate order and role design only. Objective opportunity scores remain invariant." />
+            <PageHeading eyebrow="Personalize ideas" title="Make generated ideas feel more like you." description="Choose the themes and working style you care about. This changes idea ranking only—never evidence or the final decision score." />
             <div className="mode-switch" role="group" aria-label="Profile mode">
-              <button className={state.profile.mode === "neutral" ? "active" : ""} onClick={() => setState((current) => ({ ...current, profile: emptyProfile("neutral") }))}><strong>Profile-neutral</strong><span>No personal-preference inputs</span></button>
-              <button className={state.profile.mode === "private" ? "active" : ""} onClick={() => setState((current) => ({ ...current, profile: emptyProfile("private") }))}><strong>Private profile</strong><span>Weighted fit and search themes</span></button>
+              <button className={state.profile.mode === "neutral" ? "active" : ""} onClick={() => setState((current) => ({ ...current, profile: emptyProfile("neutral") }))}><strong>Keep it neutral</strong><span>Rank ideas without personal preferences</span></button>
+              <button className={state.profile.mode === "private" ? "active" : ""} onClick={() => setState((current) => ({ ...current, profile: emptyProfile("private") }))}><strong>Personalize my ideas</strong><span>Use my interests and working style</span></button>
             </div>
             {state.profile.mode === "neutral" ? (
               <div className="profile-neutral-card">
@@ -1190,16 +1333,19 @@ export default function Home() {
               <>
                 <WeightEditor title="Search themes" subtitle="3–6 themes; weights must total 100" items={state.profile.searchThemes} onChange={(items) => setState((current) => ({ ...current, profile: { ...current.profile, searchThemes: items, locked: false } }))} />
                 <WeightEditor title="Personal-fit dimensions" subtitle="4–8 dimensions; weights must total 100" items={state.profile.fitDimensions} onChange={(items) => setState((current) => ({ ...current, profile: { ...current.profile, fitDimensions: items, locked: false } }))} />
-                <section className="form-card">
-                  <div className="form-card-head"><div><h3>Generation Priority weights</h3><p>Personal 25–45 · Opportunity 25–40 · Protocol 10–25 · Experiment 15–25</p></div><WeightTotal value={Object.values(state.profile.generationWeights).reduce((sum, weight) => sum + weight, 0)} /></div>
-                  <div className="outer-weights">
-                    {(Object.keys(state.profile.generationWeights) as Array<keyof GenerationProfile["generationWeights"]>).map((key) => (
-                      <label key={key}><span>{key.replace(/([A-Z])/g, " $1")}</span><div><input type="number" min="0" max="100" value={state.profile.generationWeights[key]} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, locked: false, generationWeights: { ...current.profile.generationWeights, [key]: Number(event.target.value) } } }))} /><b>%</b></div></label>
-                    ))}
-                  </div>
-                </section>
-                {profileErrors.length > 0 && <IssueList title="Fix before locking" items={profileErrors} tone="warning" />}
-                <div className="profile-lock-row"><span>Only this minimized weight profile is stored. Raw interview notes are not collected.</span><button className="button primary" disabled={profileErrors.length > 0} onClick={() => { setState((current) => ({ ...current, profile: { ...current.profile, locked: true } })); setToast("Private profile locked locally"); }}>{state.profile.locked ? "Profile locked" : "Lock profile"}</button></div>
+                <details className="profile-advanced">
+                  <summary>Advanced weighting</summary>
+                  <section className="form-card">
+                    <div className="form-card-head"><div><h3>Idea ranking weights</h3><p>Personal 25–45 · Opportunity 25–40 · Protocol 10–25 · Experiment 15–25</p></div><WeightTotal value={Object.values(state.profile.generationWeights).reduce((sum, weight) => sum + weight, 0)} /></div>
+                    <div className="outer-weights">
+                      {(Object.keys(state.profile.generationWeights) as Array<keyof GenerationProfile["generationWeights"]>).map((key) => (
+                        <label key={key}><span>{key.replace(/([A-Z])/g, " $1")}</span><div><input type="number" min="0" max="100" value={state.profile.generationWeights[key]} onChange={(event) => setState((current) => ({ ...current, profile: { ...current.profile, locked: false, generationWeights: { ...current.profile.generationWeights, [key]: Number(event.target.value) } } }))} /><b>%</b></div></label>
+                      ))}
+                    </div>
+                  </section>
+                </details>
+                {profileErrors.length > 0 && <IssueList title="Fix before saving" items={profileErrors} tone="warning" />}
+                <div className="profile-lock-row"><span>Only these themes and weights are saved on this computer.</span><button className="button primary" disabled={profileErrors.length > 0} onClick={() => { setState((current) => ({ ...current, profile: { ...current.profile, locked: true } })); setToast("Personalization saved locally"); }}>{state.profile.locked ? "Personalization saved" : "Save personalization"}</button></div>
               </>
             )}
           </div>
@@ -1207,7 +1353,7 @@ export default function Home() {
 
         {section === "review" && (
           <div className="page-section">
-            <PageHeading eyebrow="Deterministic review" title="Assess the thesis claim by claim." description="Blank merit is Unassessed. Unsupported evidence starts at E0. The calculator never fills gaps optimistically." />
+            <PageHeading eyebrow="Evaluate" title="Answer what must be true." description="Work through the claims one category at a time. Unanswered items stay unassessed, and the calculator never fills gaps optimistically." />
             <div className="review-config">
               <label><span>Dominant archetype</span><select value={state.review.archetype} onChange={(event) => updateReview({ archetype: event.target.value as Archetype })}>{ARCHETYPES.map((item) => <option key={item} value={item}>{archetypeLabels[item]}</option>)}</select></label>
               <label><span>Target stage</span><select value={state.review.stage} onChange={(event) => updateReview({ stage: event.target.value as Stage })}>{STAGES.map((item) => <option key={item} value={item}>{stageLabels[item]}</option>)}</select></label>
@@ -1268,7 +1414,7 @@ export default function Home() {
 
         {section === "evidence" && (
           <div className="page-section">
-            <PageHeading eyebrow="Evidence ledger" title="Make every grade traceable." description="Evidence is checked for grade ceilings, expiry, reviewer verification, duplicates, claim links, and undisclosed counterevidence." />
+            <PageHeading eyebrow="Evidence" title="Add proof for your answers." description="Link each piece of evidence to a claim. Idea Foundry checks quality limits, dates, verification, duplicates, and counterevidence." />
             <div className="evidence-layout">
               <section className="form-card evidence-form">
                 <div className="form-card-head"><div><h3>Add an evidence record</h3><p>Grades apply to a claim—not to a document in the abstract.</p></div><code>{state.review.artifacts.length + 1}</code></div>
@@ -1352,7 +1498,7 @@ export default function Home() {
 
         {section === "export" && (
           <div className="page-section narrow">
-            <PageHeading eyebrow="Portable review packet" title="Export the reasoning, not just the number." description="Downloads stay on this device. Nothing is published or uploaded by Idea Foundry." />
+            <PageHeading eyebrow="Import & export" title="Take your work with you." description="Download the complete reasoning or bring an existing review back in. Nothing is published or uploaded by Idea Foundry." />
             <section className="export-card">
               <div className="export-icon">JSON</div><div><h3>Full review packet</h3><p>Project, candidates, 51 claims, evidence ledger, gates, deterministic output, versions, and hashes.</p></div><button className="button primary" onClick={exportPacket}>Download JSON</button>
             </section>
@@ -1366,7 +1512,7 @@ export default function Home() {
       </section>
 
       <nav className="mobile-nav" aria-label="Mobile workspace">
-        {navigation.filter((item) => ["overview", "ideas", "review", "evidence", "results"].includes(item.id)).map((item) => <button key={item.id} className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}>{item.label}</button>)}
+        {primaryNavigation.map((item) => <button key={item.id} className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}>{item.label}</button>)}
       </nav>
       {toast && <div className="toast" role="status">{toast}</div>}
     </main>
@@ -1374,7 +1520,8 @@ export default function Home() {
 }
 
 function Brand({ compact = false }: { compact?: boolean }) {
-  return <div className={`brand ${compact ? "compact" : ""}`}><span className="brand-mark" aria-hidden="true"><i /><b /><em /></span><span><strong>Idea Foundry</strong><small>Xahau + Evernode</small></span></div>;
+  if (!compact) return <div className="brand brand-wide"><img src={BRAND_LOGO_URL} alt="Idea Foundry — Xahau + Evernode" /></div>;
+  return <div className="brand compact"><img src={BRAND_ICON_URL} alt="" aria-hidden="true" /><span><strong>Idea Foundry</strong><small>Xahau + Evernode</small></span></div>;
 }
 
 function PageHeading({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
@@ -1416,15 +1563,14 @@ function IssueList({ title, items, tone }: { title: string; items: string[]; ton
 
 function Overview({ state, score, selectedIdea, onNavigate, onUpdateProject }: { state: AppState; score: ReturnType<typeof scoreReview>; selectedIdea?: IdeaCandidate; onNavigate: (section: Section) => void; onUpdateProject: (patch: Partial<ProjectDetails>) => void }) {
   const steps = [
-    { id: "ideas" as const, number: "01", title: "Generate & shortlist", meta: `${state.ideas.length} candidates`, done: state.ideas.length > 0 },
-    { id: "profile" as const, number: "02", title: "Set search profile", meta: state.profile.mode === "private" ? (state.profile.locked ? "Locked" : "Draft") : "Neutral", done: state.profile.mode === "neutral" || state.profile.locked },
-    { id: "review" as const, number: "03", title: "Assess 51 claims", meta: `${score.assessedClaims}/${score.totalClaims}`, done: score.assessedClaims === score.totalClaims },
-    { id: "evidence" as const, number: "04", title: "Verify evidence", meta: `${state.review.artifacts.length} records`, done: state.review.artifacts.length > 0 },
-    { id: "results" as const, number: "05", title: "Read the decision", meta: score.official ? (score.numericEligible && score.gateEligible ? "Ready" : "Blocked") : "Provisional", done: score.official },
+    { id: "ideas" as const, number: "01", title: "Find & choose an idea", meta: selectedIdea ? "Idea chosen" : `${state.ideas.length} ideas`, done: Boolean(selectedIdea) },
+    { id: "review" as const, number: "02", title: "Evaluate what must be true", meta: `${score.assessedClaims}/${score.totalClaims} answered`, done: score.assessedClaims === score.totalClaims },
+    { id: "evidence" as const, number: "03", title: "Add proof", meta: `${state.review.artifacts.length} evidence records`, done: state.review.artifacts.length > 0 },
+    { id: "results" as const, number: "04", title: "Read the decision", meta: score.official ? (score.numericEligible && score.gateEligible ? "Ready" : "Blocked") : "Provisional", done: score.official },
   ];
   return (
     <div className="page-section overview-page">
-      <PageHeading eyebrow="Decision workspace" title="Turn enthusiasm into a testable thesis." description="One workspace keeps personal search fit, market evidence, protocol necessity, and stage readiness deliberately separate." />
+      <PageHeading eyebrow="Your project" title="Forge better ideas. Prove what holds." description="Move from a blank page to a clear decision without mixing personal preference, AI suggestions, and real evidence." />
       <div className="overview-grid">
         <section className="overview-main">
           <div className="setup-card">
@@ -1437,7 +1583,7 @@ function Overview({ state, score, selectedIdea, onNavigate, onUpdateProject }: {
           </div>
         </section>
         <aside className="overview-aside">
-          <div className="current-thesis"><p className="eyebrow">Current thesis</p><h2>{selectedIdea?.title || "No idea selected"}</h2><p>{selectedIdea?.concept || "Shortlist a candidate to begin an immutable evidence review."}</p><button className="button secondary" onClick={() => onNavigate(selectedIdea ? "review" : "ideas")}>{selectedIdea ? "Continue review" : "Explore ideas"}</button></div>
+          <div className="current-thesis"><img className="thesis-mark" src={BRAND_MARK_URL} alt="" aria-hidden="true" /><p className="eyebrow">Current idea</p><h2>{selectedIdea?.title || "No idea selected"}</h2><p>{selectedIdea?.concept || "Generate ideas or add your own, then choose one to evaluate."}</p><button className="button secondary" onClick={() => onNavigate(selectedIdea ? "review" : "ideas")}>{selectedIdea ? "Continue evaluation" : "Find an idea"}</button></div>
           <div className="boundary-card"><strong>What the app decides</strong><ul><li>Whether inputs are valid</li><li>What the locked formula calculates</li><li>Which caps, floors, and gates block the target stage</li></ul><strong>What humans still decide</strong><ul><li>Whether to invest, launch, or proceed</li><li>Whether evidence is truthful and sufficient</li><li>Whether the team should pursue the idea</li></ul></div>
         </aside>
       </div>

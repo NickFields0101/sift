@@ -36,6 +36,10 @@ export interface LlmModel {
   name: string;
 }
 
+export interface ListModelsInput extends LlmConnectionOptions {
+  query?: string;
+}
+
 export interface GenerateIdeasInput extends LlmConnectionOptions {
   prompt: string;
   count?: number;
@@ -79,7 +83,7 @@ export interface IdeaFoundryBridge {
     getConfig(): Promise<LlmConfig>;
     saveConfig(input: SaveLlmConfigInput): Promise<LlmConfig>;
     testConnection(input?: LlmConnectionOptions): Promise<LlmConnectionTest>;
-    listModels(input?: LlmConnectionOptions): Promise<LlmModel[]>;
+    listModels(input?: ListModelsInput): Promise<LlmModel[]>;
     generateIdeas(input: GenerateIdeasInput): Promise<GeneratedIdeasResult>;
   };
 }

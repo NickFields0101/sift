@@ -136,7 +136,10 @@ function registerIpc() {
   ipcMain.handle(CHANNELS.getConfig, safeHandler(getConfig));
   ipcMain.handle(CHANNELS.saveConfig, safeHandler(writeConfig));
   ipcMain.handle(CHANNELS.testConnection, safeHandler(async (input = {}) => testConnection(await resolvedConfig(input))));
-  ipcMain.handle(CHANNELS.listModels, safeHandler(async (input = {}) => listModels(await resolvedConfig(input))));
+  ipcMain.handle(CHANNELS.listModels, safeHandler(async (input = {}) => listModels(
+    await resolvedConfig(input),
+    { query: input?.query },
+  )));
   ipcMain.handle(CHANNELS.generateIdeas, safeHandler(async (input = {}) => {
     const prompt = typeof input?.prompt === "string" ? input.prompt : "";
     const count = input?.count;

@@ -10,6 +10,7 @@
     "app/page.tsx",
     "app/lib/**/*.ts",
     "app/desktop-bridge.d.ts",
+    "app/static-assets.d.ts",
     "desktop/renderer/**/*.tsx",
     "vite.desktop.config.ts"
   ],
