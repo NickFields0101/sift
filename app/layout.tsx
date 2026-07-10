@@ -17,7 +17,10 @@ const title = `Find the idea worth disproving | ${productName}`;
 const description =
   "Generate and review Xahau and Evernode ideas with deterministic 51-claim scoring, evidence validation, non-compensable gates, and local-first privacy.";
 const configuredSiteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-const metadataBase = new URL(configuredSiteUrl || "http://localhost:3000");
+const metadataBase = new URL(
+  configuredSiteUrl ||
+    "https://xahau-evernode-idea-foundry.allmoneyinrollin40.chatgpt.site",
+);
 
 export const metadata: Metadata = {
   metadataBase,
