@@ -4,6 +4,7 @@ const MAX_RESPONSE_BYTES = 2_000_000;
 const MAX_MODEL_CATALOG_BYTES = 8_000_000;
 const MAX_PROMPT_CHARS = 60_000;
 const MAX_LISTED_MODELS = 2_000;
+const MAX_MODEL_QUERY_CHARS = 200;
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 export const PROVIDER_DEFAULTS = Object.freeze({
@@ -222,14 +223,30 @@ function normalizeListedModels(models, nativeOllama = false) {
   return normalized;
 }
 
-export async function listModels(configInput, { fetchImpl = fetch, timeoutMs = 15_000 } = {}) {
+function normalizeModelQuery(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") {
+    throw new ConnectorError("invalid_model_query", "The model search must be text.");
+  }
+  const query = value.trim();
+  if (query.length > MAX_MODEL_QUERY_CHARS || /[\u0000-\u001F\u007F]/.test(query)) {
+    throw new ConnectorError("invalid_model_query", "The model search is too long or contains unsupported characters.");
+  }
+  return query;
+}
+
+export async function listModels(configInput, { fetchImpl = fetch, timeoutMs = 15_000, query } = {}) {
   const config = normalizeConfig(configInput);
+  const modelQuery = config.provider === "openrouter" ? normalizeModelQuery(query) : "";
   if (config.provider === "ollama") {
     const payload = parseJson(await request(config, "api/tags", { method: "GET", headers: headersFor(config) }, fetchImpl, timeoutMs, MAX_MODEL_CATALOG_BYTES));
     const models = Array.isArray(payload?.models) ? payload.models : [];
     return normalizeListedModels(models, true);
   }
-  const payload = parseJson(await request(config, "models", { method: "GET", headers: headersFor(config) }, fetchImpl, timeoutMs, MAX_MODEL_CATALOG_BYTES));
+  const modelsPath = config.provider === "openrouter" && modelQuery
+    ? `models?${new URLSearchParams({ q: modelQuery }).toString()}`
+    : "models";
+  const payload = parseJson(await request(config, modelsPath, { method: "GET", headers: headersFor(config) }, fetchImpl, timeoutMs, MAX_MODEL_CATALOG_BYTES));
   const models = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : [];
   return normalizeListedModels(models);
 }

@@ -106,6 +106,118 @@ test("lists OpenRouter models through the pinned endpoint with required authenti
   );
 });
 
+test("searches OpenRouter models by an encoded typeahead query", async () => {
+  const secret = "openrouter-secret-that-must-stay-in-the-header";
+  let request = {};
+  const models = await listModels(
+    { provider: "openrouter", apiKey: secret },
+    {
+      query: "4.8",
+      fetchImpl: async (url, options) => {
+        request = { url: String(url), options };
+        return jsonResponse({
+          data: [
+            { id: "anthropic/claude-opus-4.8", name: "Anthropic: Claude Opus 4.8" },
+          ],
+        });
+      },
+    },
+  );
+
+  assert.equal(request.url, "https://openrouter.ai/api/v1/models?q=4.8");
+  assert.equal(request.options.redirect, "error");
+  assert.equal(request.options.headers.Authorization, `Bearer ${secret}`);
+  assert.doesNotMatch(request.url, new RegExp(secret));
+  assert.deepEqual(models, [{
+    id: "anthropic/claude-opus-4.8",
+    name: "Anthropic: Claude Opus 4.8",
+  }]);
+  assert.doesNotMatch(JSON.stringify(models), /openrouter-secret|\"4\.8\"/);
+});
+
+test("URL-encodes OpenRouter search text without changing the pinned origin", async () => {
+  const query = "Claude Opus / 4.8 & beta?";
+  let requestedUrl = "";
+  await listModels(
+    { provider: "openrouter", apiKey: "search-key" },
+    {
+      query,
+      fetchImpl: async (url) => {
+        requestedUrl = String(url);
+        return jsonResponse({ data: [] });
+      },
+    },
+  );
+
+  const parsed = new URL(requestedUrl);
+  assert.equal(parsed.origin, "https://openrouter.ai");
+  assert.equal(parsed.pathname, "/api/v1/models");
+  assert.equal(parsed.searchParams.get("q"), query);
+  assert.match(requestedUrl, /q=Claude\+Opus\+%2F\+4\.8\+%26\+beta%3F$/);
+});
+
+test("does not leak OpenRouter keys or model queries through sanitized failures", async () => {
+  const apiKey = "private-openrouter-key";
+  const query = "private model search";
+  await assert.rejects(
+    listModels(
+      { provider: "openrouter", apiKey },
+      {
+        query,
+        fetchImpl: async (url, options) => {
+          throw new Error(`network detail ${url} ${options.headers.Authorization}`);
+        },
+      },
+    ),
+    (error) => {
+      assert.match(error.message, /could not be reached/);
+      assert.doesNotMatch(error.message, new RegExp(apiKey));
+      assert.doesNotMatch(error.message, new RegExp(query));
+      return true;
+    },
+  );
+});
+
+test("keeps non-OpenRouter model catalogs and queryless calls backward-compatible", async () => {
+  const requests = [];
+  const fetchImpl = async (url) => {
+    requests.push(String(url));
+    return jsonResponse({ data: [{ id: "local/model", name: "Local model" }] });
+  };
+
+  const withIgnoredQuery = await listModels(
+    { provider: "lmstudio", baseUrl: "http://localhost:1234/v1" },
+    { query: "4.8", fetchImpl },
+  );
+  const withoutQuery = await listModels(
+    { provider: "openrouter", apiKey: "openrouter-test-key" },
+    { fetchImpl },
+  );
+
+  assert.deepEqual(requests, [
+    "http://localhost:1234/v1/models",
+    "https://openrouter.ai/api/v1/models",
+  ]);
+  assert.deepEqual(withIgnoredQuery, [{ id: "local/model", name: "Local model" }]);
+  assert.deepEqual(withoutQuery, [{ id: "local/model", name: "Local model" }]);
+});
+
+test("rejects unsafe model search values before making a request", async () => {
+  let called = false;
+  const fetchImpl = async () => {
+    called = true;
+    return jsonResponse({ data: [] });
+  };
+  await assert.rejects(
+    listModels(
+      { provider: "openrouter", apiKey: "openrouter-test-key" },
+      { query: `model\nsearch`, fetchImpl },
+    ),
+    /unsupported characters/,
+  );
+  assert.equal(called, false);
+});
+
 test("keeps large provider catalogs searchable beyond the first 500 entries", async () => {
   const catalog = Array.from({ length: 650 }, (_, index) => ({
     id: `provider/model-${index}`,
