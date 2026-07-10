@@ -28,8 +28,15 @@ import {
   type ReviewInput,
   type Stage,
 } from "./lib/scoring";
+import type {
+  LlmConfig,
+  LlmConnectionOptions,
+  LlmProvider,
+  NormalizedGeneratedIdea,
+  SaveLlmConfigInput,
+} from "./desktop-bridge";
 
-type Section = "overview" | "ideas" | "profile" | "review" | "evidence" | "results" | "export";
+type Section = "overview" | "ideas" | "profile" | "model" | "review" | "evidence" | "results" | "export";
 
 interface IdeaCandidate {
   id: string;
@@ -42,6 +49,12 @@ interface IdeaCandidate {
   experiment: string;
   route: "Xahau" | "Evernode" | "Both" | "Neither yet";
   scores: GenerationComponentScores;
+  source?: {
+    kind: "llm";
+    provider: string;
+    model: string;
+    generatedAt: string;
+  };
 }
 
 interface ProjectDetails {
@@ -59,6 +72,60 @@ interface AppState {
 }
 
 const STORAGE_KEY = "idea-foundry-v1";
+
+const LLM_PROVIDERS: Record<LlmProvider, {
+  label: string;
+  defaultUrl: string;
+  boundary: string;
+  location: string;
+  remote: boolean;
+  keyRequired: boolean;
+  lockedEndpoint: boolean;
+}> = {
+  ollama: {
+    label: "Ollama",
+    defaultUrl: "http://127.0.0.1:11434",
+    boundary: "Local by default. Prompts stay on this computer when Ollama is running locally.",
+    location: "Localhost",
+    remote: false,
+    keyRequired: false,
+    lockedEndpoint: false,
+  },
+  lmstudio: {
+    label: "LM Studio",
+    defaultUrl: "http://127.0.0.1:1234/v1",
+    boundary: "Local by default. Prompts stay on this computer when LM Studio is running locally.",
+    location: "Localhost",
+    remote: false,
+    keyRequired: false,
+    lockedEndpoint: false,
+  },
+  openrouter: {
+    label: "OpenRouter",
+    defaultUrl: "https://openrouter.ai/api/v1",
+    boundary: "Cloud endpoint. The displayed prompt is sent to OpenRouter and the selected model provider. An OpenRouter API key is required.",
+    location: "Cloud · API key",
+    remote: true,
+    keyRequired: true,
+    lockedEndpoint: true,
+  },
+  openaiCompatible: {
+    label: "OpenAI-compatible",
+    defaultUrl: "https://api.openai.com/v1",
+    boundary: "May be local or cloud. Prompts leave this computer whenever the endpoint is remote.",
+    location: "Local or cloud",
+    remote: true,
+    keyRequired: false,
+    lockedEndpoint: false,
+  },
+};
+
+const DEFAULT_LLM_CONFIG: LlmConfig = {
+  provider: "ollama",
+  baseUrl: LLM_PROVIDERS.ollama.defaultUrl,
+  model: "",
+  hasApiKey: false,
+};
 
 const archetypeLabels: Record<Archetype, string> = {
   application: "Application",
@@ -219,6 +286,102 @@ function downloadFile(name: string, body: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function requiredGeneratedText(record: Record<string, unknown>, key: string, maxLength = 4000) {
+  const value = record[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= maxLength ? trimmed : null;
+}
+
+function generatedScore(record: Record<string, unknown>, key: keyof GenerationComponentScores) {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+    ? value
+    : null;
+}
+
+function validateGeneratedIdea(
+  value: unknown,
+  requirePersonalFit: boolean,
+): Omit<IdeaCandidate, "id" | "source"> | null {
+  const record = recordValue(value);
+  if (!record) return null;
+  const scores = recordValue(record.scores);
+  if (!scores) return null;
+
+  const title = requiredGeneratedText(record, "title", 180);
+  const concept = requiredGeneratedText(record, "concept");
+  const user = requiredGeneratedText(record, "user", 500);
+  const buyer = requiredGeneratedText(record, "buyer", 500);
+  const currentAlternative = requiredGeneratedText(record, "currentAlternative");
+  const criticalAssumption = requiredGeneratedText(record, "criticalAssumption");
+  const experiment = requiredGeneratedText(record, "experiment");
+  const route = record.route;
+  const allowedRoutes = ["Xahau", "Evernode", "Both", "Neither yet"] as const;
+  const opportunitySignal = generatedScore(scores, "opportunitySignal");
+  const protocolAffordance = generatedScore(scores, "protocolAffordance");
+  const experimentability = generatedScore(scores, "experimentability");
+  const suppliedPersonalFit = generatedScore(scores, "personalFit");
+
+  if (
+    !title ||
+    !concept ||
+    !user ||
+    !buyer ||
+    !currentAlternative ||
+    !criticalAssumption ||
+    !experiment ||
+    typeof route !== "string" ||
+    !allowedRoutes.includes(route as (typeof allowedRoutes)[number]) ||
+    opportunitySignal === null ||
+    protocolAffordance === null ||
+    experimentability === null ||
+    (requirePersonalFit && suppliedPersonalFit === null)
+  ) {
+    return null;
+  }
+
+  return {
+    title,
+    concept,
+    user,
+    buyer,
+    currentAlternative,
+    criticalAssumption,
+    experiment,
+    route: route as IdeaCandidate["route"],
+    scores: {
+      personalFit: suppliedPersonalFit ?? 50,
+      opportunitySignal,
+      protocolAffordance,
+      experimentability,
+    },
+  };
+}
+
+function normalizeLlmConfig(value: unknown): LlmConfig {
+  const record = recordValue(value);
+  const provider =
+    record?.provider === "ollama" || record?.provider === "lmstudio" || record?.provider === "openrouter" || record?.provider === "openaiCompatible"
+      ? record.provider
+      : DEFAULT_LLM_CONFIG.provider;
+  return {
+    provider,
+    baseUrl:
+      typeof record?.baseUrl === "string" && record.baseUrl.trim()
+        ? record.baseUrl.trim()
+        : LLM_PROVIDERS[provider].defaultUrl,
+    model: typeof record?.model === "string" ? record.model : "",
+    hasApiKey: record?.hasApiKey === true,
+  };
+}
+
 export default function Home() {
   const [section, setSection] = useState<Section>("overview");
   const [state, setState] = useState<AppState>(defaultState);
@@ -226,6 +389,17 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [includeProfile, setIncludeProfile] = useState(false);
   const [importText, setImportText] = useState("");
+  const [desktopVersion, setDesktopVersion] = useState("");
+  const [llmConfig, setLlmConfig] = useState<LlmConfig>(DEFAULT_LLM_CONFIG);
+  const [llmApiKey, setLlmApiKey] = useState("");
+  const [clearLlmApiKey, setClearLlmApiKey] = useState(false);
+  const [llmModels, setLlmModels] = useState<Array<{ id: string; name: string }>>([]);
+  const [llmBusy, setLlmBusy] = useState<"loading" | "saving" | "testing" | "models" | null>(null);
+  const [llmMessage, setLlmMessage] = useState("");
+  const [llmMessageTone, setLlmMessageTone] = useState<"neutral" | "success" | "error">("neutral");
+  const [ideaCount, setIdeaCount] = useState(8);
+  const [generatingIdeas, setGeneratingIdeas] = useState(false);
+  const [lastGeneration, setLastGeneration] = useState<{ provider: string; model: string; count: number } | null>(null);
   const [evidenceDraft, setEvidenceDraft] = useState({
     title: "",
     claimId: "1A",
@@ -238,6 +412,37 @@ export default function Home() {
     reviewer: "",
     relationshipOrConflict: "None",
   });
+  const desktopAvailable = typeof window === "undefined" ? null : window.ideaFoundry?.desktop === true;
+  const selectedLlmProvider = LLM_PROVIDERS[llmConfig.provider];
+  const llmHasUsableApiKey = Boolean(llmApiKey.trim() || (llmConfig.hasApiKey && !clearLlmApiKey));
+  const llmReady = Boolean(llmConfig.model.trim() && (!selectedLlmProvider.keyRequired || llmHasUsableApiKey));
+
+  useEffect(() => {
+    const bridge = window.ideaFoundry;
+    if (!bridge?.desktop) return;
+
+    let cancelled = false;
+    Promise.all([bridge.app.getVersion(), bridge.llm.getConfig()])
+      .then(([version, config]) => {
+        if (cancelled) return;
+        setDesktopVersion(version);
+        setLlmConfig(normalizeLlmConfig(config));
+        setLlmMessage("Connector settings loaded from this computer.");
+        setLlmMessageTone("neutral");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setLlmMessage(error instanceof Error ? error.message : "Could not load the local connector settings.");
+        setLlmMessageTone("error");
+      })
+      .finally(() => {
+        if (!cancelled) setLlmBusy(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -245,6 +450,8 @@ export default function Home() {
       try {
         const parsed = JSON.parse(saved) as AppState;
         if (parsed.review?.claims?.length === RUBRIC.length) {
+          // Browser storage is an external system; hydration intentionally happens after mount.
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           setState({
             ...parsed,
             review: {
@@ -363,6 +570,137 @@ export default function Home() {
       project: { ...current.project, title: idea.title, selectedIdeaId: idea.id },
     }));
     setSection("review");
+  }
+
+  function currentLlmInput(): SaveLlmConfigInput {
+    return {
+      provider: llmConfig.provider,
+      baseUrl: llmConfig.baseUrl.trim(),
+      model: llmConfig.model.trim(),
+      ...(llmApiKey.trim() ? { apiKey: llmApiKey.trim() } : {}),
+      ...(clearLlmApiKey ? { clearApiKey: true } : {}),
+    };
+  }
+
+  async function saveLlmSettings() {
+    const bridge = window.ideaFoundry;
+    if (!bridge?.desktop) throw new Error("The model connector is available in the desktop app.");
+    setLlmBusy("saving");
+    setLlmMessage("Saving this connector on your computer…");
+    setLlmMessageTone("neutral");
+    try {
+      const saved = await bridge.llm.saveConfig(currentLlmInput());
+      const normalized = normalizeLlmConfig(saved);
+      setLlmConfig(normalized);
+      setLlmApiKey("");
+      setClearLlmApiKey(false);
+      setLlmMessage("Connector saved locally. API credentials are protected by the operating system.");
+      setLlmMessageTone("success");
+      return normalized;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not save the connector.";
+      setLlmMessage(message);
+      setLlmMessageTone("error");
+      throw error;
+    } finally {
+      setLlmBusy(null);
+    }
+  }
+
+  async function testLlmConnection() {
+    const bridge = window.ideaFoundry;
+    if (!bridge?.desktop) return;
+    setLlmBusy("testing");
+    setLlmMessage("Testing the endpoint without sending project data…");
+    setLlmMessageTone("neutral");
+    try {
+      const result = await bridge.llm.testConnection(currentLlmInput() as LlmConnectionOptions);
+      setLlmMessage(result.message || (result.ok ? "Connection succeeded." : "Connection failed."));
+      setLlmMessageTone(result.ok ? "success" : "error");
+    } catch (error) {
+      setLlmMessage(error instanceof Error ? error.message : "Connection failed.");
+      setLlmMessageTone("error");
+    } finally {
+      setLlmBusy(null);
+    }
+  }
+
+  async function refreshLlmModels() {
+    const bridge = window.ideaFoundry;
+    if (!bridge?.desktop) return;
+    setLlmBusy("models");
+    setLlmMessage("Reading the models exposed by this endpoint…");
+    setLlmMessageTone("neutral");
+    try {
+      const models = await bridge.llm.listModels(currentLlmInput() as LlmConnectionOptions);
+      setLlmModels(models);
+      if (!llmConfig.model && models.length === 1) {
+        setLlmConfig((current) => ({ ...current, model: models[0].id }));
+      }
+      setLlmMessage(models.length ? `${models.length} model${models.length === 1 ? "" : "s"} available.` : "The endpoint returned no models.");
+      setLlmMessageTone(models.length ? "success" : "error");
+    } catch (error) {
+      setLlmModels([]);
+      setLlmMessage(error instanceof Error ? error.message : "Could not list models.");
+      setLlmMessageTone("error");
+    } finally {
+      setLlmBusy(null);
+    }
+  }
+
+  async function generateWithConnectedLlm() {
+    const bridge = window.ideaFoundry;
+    if (!bridge?.desktop) {
+      setSection("model");
+      return;
+    }
+    if (!llmConfig.model.trim()) {
+      setLlmMessage("Choose or enter a model before generating ideas.");
+      setLlmMessageTone("error");
+      setSection("model");
+      return;
+    }
+    if (selectedLlmProvider.keyRequired && !llmHasUsableApiKey) {
+      setLlmMessage("Enter an OpenRouter API key before generating ideas.");
+      setLlmMessageTone("error");
+      setSection("model");
+      return;
+    }
+
+    setGeneratingIdeas(true);
+    try {
+      const saved = normalizeLlmConfig(await bridge.llm.saveConfig(currentLlmInput()));
+      setLlmConfig(saved);
+      setLlmApiKey("");
+      setClearLlmApiKey(false);
+      const generationPrompt = prompt.replace("Generate 8 diverse candidates", `Generate ${ideaCount} diverse candidates`);
+      const result = await bridge.llm.generateIdeas({
+        prompt: generationPrompt,
+        count: ideaCount,
+        provider: saved.provider,
+        baseUrl: saved.baseUrl,
+        model: saved.model,
+      });
+      const generatedAt = new Date().toISOString();
+      const candidates = result.ideas
+        .map((idea: NormalizedGeneratedIdea) => validateGeneratedIdea(idea, state.profile.mode === "private"))
+        .filter((idea): idea is Omit<IdeaCandidate, "id" | "source"> => idea !== null)
+        .map((idea) => ({
+          ...idea,
+          id: crypto.randomUUID(),
+          source: { kind: "llm" as const, provider: result.provider, model: result.model, generatedAt },
+        }));
+      if (candidates.length === 0) throw new Error("The model returned no ideas that passed the local schema.");
+      setState((current) => ({ ...current, ideas: [...current.ideas, ...candidates] }));
+      setLastGeneration({ provider: result.provider, model: result.model, count: candidates.length });
+      setToast(`${candidates.length} AI hypotheses added`);
+    } catch (error) {
+      setLlmMessage(error instanceof Error ? error.message : "Idea generation failed.");
+      setLlmMessageTone("error");
+      setSection("model");
+    } finally {
+      setGeneratingIdeas(false);
+    }
   }
 
   function addEvidence() {
@@ -539,6 +877,7 @@ export default function Home() {
     { id: "overview", label: "Overview" },
     { id: "ideas", label: "Ideas", meta: String(state.ideas.length) },
     { id: "profile", label: "Profile", meta: state.profile.mode === "private" ? (profileErrors.length ? "!" : "P") : "N" },
+    { id: "model", label: "LLM", meta: desktopAvailable && llmReady ? "✓" : "—" },
     { id: "review", label: "Review", meta: `${score.assessedClaims}/${score.totalClaims}` },
     { id: "evidence", label: "Evidence", meta: String(state.review.artifacts.length) },
     { id: "results", label: "Results", meta: score.numericEligible && score.gateEligible ? "✓" : "!" },
@@ -599,9 +938,18 @@ export default function Home() {
             <PageHeading eyebrow="Exploration workspace" title="Generate candidates before you defend one." description="Idea priority is a search heuristic. It never changes the objective 51-claim score." />
             <div className="notice neutral"><strong>Profile boundary</strong><span>{state.profile.mode === "private" ? "Your private profile changes ranking only—not evidence, gates, weights, or readiness." : "Neutral mode ignores personal fit and ranks only opportunity, protocol affordance, and experimentability."}</span></div>
             <div className="idea-toolbar">
+              <button className="button primary" disabled={generatingIdeas} onClick={generateWithConnectedLlm}>
+                {generatingIdeas ? "Generating hypotheses…" : "Generate with connected LLM"}
+              </button>
               <button className="button primary" onClick={loadStarterSlate}>Load editable starter slate</button>
               <button className="button secondary" onClick={addIdea}>Add idea manually</button>
               <button className="button ghost" onClick={() => copyText(prompt, "LLM prompt copied")}>Copy generation prompt</button>
+            </div>
+            <div className="generation-status">
+              <span className={desktopAvailable && llmReady ? "connected" : "disconnected"} aria-hidden="true" />
+              <strong>{desktopAvailable && llmReady ? `${LLM_PROVIDERS[llmConfig.provider].label} · ${llmConfig.model}` : "No model selected"}</strong>
+              <button className="text-button" onClick={() => setSection("model")}>Connector settings →</button>
+              {lastGeneration && <small>Last slate: {lastGeneration.count} ideas from {lastGeneration.model}</small>}
             </div>
             <details className="prompt-panel">
               <summary>Use with any LLM</summary>
@@ -641,7 +989,7 @@ export default function Home() {
                           ))}
                         </div>
                         <div className="idea-actions">
-                          <span>Exploration only · not validated</span>
+                          <span>Exploration only · not validated{idea.source ? ` · AI draft from ${idea.source.model}` : ""}</span>
                           <button className="button small primary" onClick={() => beginReview(idea)}>Start 51-claim review</button>
                         </div>
                       </div>
@@ -649,6 +997,94 @@ export default function Home() {
                   );
                 })}
               </div>
+            )}
+          </div>
+        )}
+
+        {section === "model" && (
+          <div className="page-section narrow">
+            <PageHeading eyebrow="Optional model intelligence" title="Connect a model without surrendering the calculator." description="Your model may propose hypotheses. Only confirmed human inputs enter the deterministic evidence review." />
+            {desktopAvailable === false ? (
+              <section className="desktop-required-card">
+                <span className="desktop-required-mark">DESKTOP</span>
+                <div>
+                  <h2>The connector runs in the desktop edition</h2>
+                  <p>This web edition can still copy prompts for any LLM. The desktop app adds private localhost connections plus optional cloud providers such as OpenRouter, with operating-system-protected credentials and no ChatGPT account requirement.</p>
+                </div>
+              </section>
+            ) : (
+              <>
+                <div className="model-boundary-grid">
+                  <article><span>01</span><strong>Model proposes</strong><p>Ideas, assumptions, interview questions, and experiments enter as editable hypotheses.</p></article>
+                  <article><span>02</span><strong>You confirm</strong><p>No model output becomes evidence, a grade, or a gate decision automatically.</p></article>
+                  <article><span>03</span><strong>Engine calculates</strong><p>The locked 51-claim rules engine remains provider-independent and deterministic.</p></article>
+                </div>
+
+                <section className="form-card model-config-card">
+                  <div className="form-card-head">
+                    <div><h3>Model endpoint</h3><p>{desktopVersion ? `Desktop ${desktopVersion} · ` : ""}Stored only on this computer</p></div>
+                    <span className={`connector-state ${llmReady ? "ready" : "idle"}`}>{llmReady ? "Configured" : "Not configured"}</span>
+                  </div>
+                  <div className="provider-picker" role="group" aria-label="LLM provider">
+                    {(Object.keys(LLM_PROVIDERS) as LlmProvider[]).map((provider) => (
+                      <button
+                        key={provider}
+                        className={llmConfig.provider === provider ? "active" : ""}
+                        onClick={() => {
+                          setLlmConfig({ provider, baseUrl: LLM_PROVIDERS[provider].defaultUrl, model: "", hasApiKey: false });
+                          setLlmApiKey("");
+                          setClearLlmApiKey(false);
+                          setLlmModels([]);
+                          setLlmMessage("");
+                        }}
+                      >
+                        <strong>{LLM_PROVIDERS[provider].label}</strong>
+                        <span>{LLM_PROVIDERS[provider].location}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className={`endpoint-boundary ${selectedLlmProvider.remote ? "remote-warning" : "local"}`}>
+                    <strong>{selectedLlmProvider.remote ? "Cloud boundary" : "Local endpoint"}</strong>
+                    <span>{selectedLlmProvider.boundary}</span>
+                  </div>
+                  <div className="model-field-grid">
+                    <label className="full-field">
+                      <span>Base URL</span>
+                      <input value={llmConfig.baseUrl} spellCheck={false} readOnly={selectedLlmProvider.lockedEndpoint} aria-readonly={selectedLlmProvider.lockedEndpoint} onChange={(event) => setLlmConfig((current) => ({ ...current, baseUrl: event.target.value }))} />
+                    </label>
+                    <label className="full-field">
+                      <span>Model</span>
+                      <input list="available-llm-models" value={llmConfig.model} placeholder="Choose or enter a model ID" onChange={(event) => setLlmConfig((current) => ({ ...current, model: event.target.value }))} />
+                      <datalist id="available-llm-models">{llmModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
+                    </label>
+                    <label className="full-field model-key-field">
+                      <span>API key {selectedLlmProvider.keyRequired ? "(required)" : "(optional)"}</span>
+                      <input type="password" autoComplete="off" required={selectedLlmProvider.keyRequired} aria-required={selectedLlmProvider.keyRequired} value={llmApiKey} placeholder={llmConfig.hasApiKey ? "A protected key is already saved" : selectedLlmProvider.keyRequired ? "Paste your OpenRouter API key" : "Leave blank when the endpoint needs no key"} onChange={(event) => { setLlmApiKey(event.target.value); setClearLlmApiKey(false); }} />
+                      <small>{llmConfig.provider === "openrouter" ? "Stored with operating-system encryption; never written to projects, exports, or browser storage." : "Never written to project files or browser storage."}</small>
+                    </label>
+                    <label className="idea-count-field">
+                      <span>Ideas per slate</span>
+                      <input type="number" min="1" max="12" value={ideaCount} onChange={(event) => setIdeaCount(Math.max(1, Math.min(12, Number(event.target.value) || 1)))} />
+                    </label>
+                  </div>
+                  {llmConfig.hasApiKey && (selectedLlmProvider.keyRequired ? (
+                    <p className="required-key-note">To remove this required key, choose another provider and save it. Paste a new key above to replace it.</p>
+                  ) : (
+                    <label className="check-field clear-key-field"><input type="checkbox" checked={clearLlmApiKey} onChange={(event) => setClearLlmApiKey(event.target.checked)} /><span>Remove the saved API key</span></label>
+                  ))}
+                  <div className="model-actions">
+                    <button className="button secondary" disabled={llmBusy !== null} onClick={refreshLlmModels}>{llmBusy === "models" ? "Reading models…" : "Refresh models"}</button>
+                    <button className="button secondary" disabled={llmBusy !== null} onClick={testLlmConnection}>{llmBusy === "testing" ? "Testing…" : "Test connection"}</button>
+                    <button className="button primary" disabled={llmBusy !== null} onClick={() => void saveLlmSettings()}>{llmBusy === "saving" ? "Saving…" : "Save locally"}</button>
+                  </div>
+                  {llmMessage && <div className={`connector-message ${llmMessageTone}`} role="status">{llmMessage}</div>}
+                </section>
+
+                <section className="model-generation-card">
+                  <div><p className="eyebrow">Ready when you are</p><h2>Generate an editable hypothesis slate</h2><p>The current profile and domain boundary will be included. With a remote endpoint, that selected context leaves this computer.</p></div>
+                  <button className="button primary" disabled={generatingIdeas || !llmReady} onClick={generateWithConnectedLlm}>{generatingIdeas ? "Generating…" : `Generate ${ideaCount} ideas`}</button>
+                </section>
+              </>
             )}
           </div>
         )}
