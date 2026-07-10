@@ -106,6 +106,28 @@ test("lists OpenRouter models through the pinned endpoint with required authenti
   );
 });
 
+test("keeps large provider catalogs searchable beyond the first 500 entries", async () => {
+  const catalog = Array.from({ length: 650 }, (_, index) => ({
+    id: `provider/model-${index}`,
+    name: `Model ${index}`,
+  }));
+  catalog.push({ id: "anthropic/claude-opus-4.8", name: "Anthropic: Claude Opus 4.8" });
+  catalog.push({ id: "anthropic/claude-opus-4.8", name: "Duplicate should be ignored" });
+  catalog.push({ id: "provider/no-friendly-name" });
+
+  const models = await listModels(
+    { provider: "openrouter", apiKey: "openrouter-test-key" },
+    { fetchImpl: async () => jsonResponse({ data: catalog }) },
+  );
+
+  assert.equal(models.length, 652);
+  assert.deepEqual(models.at(-2), {
+    id: "anthropic/claude-opus-4.8",
+    name: "Anthropic: Claude Opus 4.8",
+  });
+  assert.deepEqual(models.at(-1), { id: "provider/no-friendly-name", name: "provider/no-friendly-name" });
+});
+
 test("connection tests do not send project content", async () => {
   let method = "";
   const result = await testConnection(
@@ -179,7 +201,7 @@ test("rejects malformed, incomplete, and oversized model output", async () => {
   );
   assert.throws(() => normalizeGeneratedIdea({ title: "Only a title" }), /invalid idea|incomplete idea/);
   await assert.rejects(
-    listModels(config, { fetchImpl: async () => new Response("{}", { status: 200, headers: { "content-length": "3000000" } }) }),
+    listModels(config, { fetchImpl: async () => new Response("{}", { status: 200, headers: { "content-length": "9000000" } }) }),
     /too large/,
   );
   await assert.rejects(

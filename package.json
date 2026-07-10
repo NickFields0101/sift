@@ -1,6 +1,6 @@
 {
   "name": "xahau-evernode-idea-foundry",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local-first deterministic idea generation and evidence validation for Xahau and Evernode.",
   "author": "Nick Fields",
   "private": true,
@@ -13,13 +13,17 @@
     "build": "vinext build",
     "start": "vinext start",
     "pretest": "vinext build",
-    "test": "node --test tests/scoring.test.ts tests/llm-core.test.mjs tests/desktop-security.test.mjs tests/rendered-html.test.mjs",
+    "test": "node --test tests/scoring.test.ts tests/model-search.test.ts tests/llm-core.test.mjs tests/desktop-security.test.mjs tests/rendered-html.test.mjs",
     "desktop:build": "vite build --config vite.desktop.config.ts",
     "desktop:typecheck": "tsc -p tsconfig.desktop.json",
     "predesktop:run": "npm run desktop:build",
     "desktop:run": "electron .",
     "predesktop:package": "npm run desktop:build",
     "desktop:package": "node scripts/package-desktop.mjs",
+    "predesktop:package:win": "npm run desktop:build",
+    "desktop:package:win": "node scripts/package-desktop.mjs --platform windows --arch x64",
+    "predesktop:package:mac": "npm run desktop:build",
+    "desktop:package:mac": "node scripts/package-desktop.mjs --platform mac",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop-dist --ignore-pattern release",
     "db:generate": "drizzle-kit generate"
   },
@@ -80,6 +84,30 @@
           ]
         }
       ]
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "artifactName": "Idea-Foundry-${version}-macOS-${arch}.${ext}",
+      "minimumSystemVersion": "12.0",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     },
     "nsis": {
       "artifactName": "Idea-Foundry-Setup-${version}-${arch}.${ext}",

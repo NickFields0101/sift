@@ -1,0 +1,189 @@
+name: Desktop release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Use Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Type-check desktop renderer
+        run: npm run desktop:typecheck
+      - name: Run deterministic, connector, security, and rendering tests
+        run: npm test
+      - name: Require release tag to match package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "$expected" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $expected." >&2
+            exit 1
+          fi
+
+  windows:
+    name: Windows x64
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Use Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Build installer and portable executable
+        run: npm run desktop:package:win
+      - name: Write Windows checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -LiteralPath release -Filter *.exe | Sort-Object Name
+          if ($files.Count -ne 2) { throw "Expected the installer and portable executable." }
+          $lines = $files | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $lines | Set-Content -LiteralPath release/SHA256SUMS-Windows-x64.txt -Encoding utf8NoBOM
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: idea-foundry-windows-x64
+          path: |
+            release/Idea-Foundry-Setup-*.exe
+            release/Idea-Foundry-Portable-*.exe
+            release/*.blockmap
+            release/SHA256SUMS-Windows-x64.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            host_arch: arm64
+          - arch: x64
+            runner: macos-15-intel
+            host_arch: x86_64
+    env:
+      # Releases are intentionally unsigned until Apple Developer credentials are configured.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Use Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Confirm native build architecture
+        shell: bash
+        run: |
+          actual="$(uname -m)"
+          test "$actual" = "${{ matrix.host_arch }}" || { echo "Expected ${{ matrix.host_arch }}, got $actual." >&2; exit 1; }
+      - name: Build DMG and ZIP
+        run: npm run desktop:package:mac -- --arch=${{ matrix.arch }}
+      - name: Inspect and launch the packaged app
+        shell: bash
+        run: |
+          archive="$(find release -maxdepth 1 -name 'Idea-Foundry-*-macOS-${{ matrix.arch }}.zip' -print -quit)"
+          dmg="$(find release -maxdepth 1 -name 'Idea-Foundry-*-macOS-${{ matrix.arch }}.dmg' -print -quit)"
+          test -n "$archive" && test -n "$dmg"
+          mkdir smoke-app
+          ditto -x -k "$archive" smoke-app
+          app_path="smoke-app/Idea Foundry.app"
+          executable="$app_path/Contents/MacOS/Idea Foundry"
+          test -x "$executable"
+          binary_archs="$(lipo -archs "$executable")"
+          expected_binary_arch="${{ matrix.host_arch }}"
+          test "$binary_archs" = "$expected_binary_arch" || { echo "Expected $expected_binary_arch app, got $binary_archs." >&2; exit 1; }
+          "$executable" >idea-foundry-smoke.log 2>&1 &
+          app_pid=$!
+          cleanup() { kill "$app_pid" >/dev/null 2>&1 || true; wait "$app_pid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          sleep 8
+          kill -0 "$app_pid" || { cat idea-foundry-smoke.log; exit 1; }
+          mount_output="$(hdiutil attach "$dmg" -nobrowse -readonly)"
+          volume="$(printf '%s\n' "$mount_output" | sed -n 's|^.*\(/Volumes/.*\)$|\1|p' | tail -n 1)"
+          test -n "$volume" && test -d "$volume/Idea Foundry.app"
+          hdiutil detach "$volume"
+      - name: Write macOS checksums
+        shell: bash
+        run: |
+          cd release
+          shasum -a 256 *-macOS-${{ matrix.arch }}.dmg *-macOS-${{ matrix.arch }}.zip > SHA256SUMS-macOS-${{ matrix.arch }}.txt
+      - name: Upload macOS packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: idea-foundry-macos-${{ matrix.arch }}
+          path: |
+            release/Idea-Foundry-*-macOS-${{ matrix.arch }}.dmg
+            release/Idea-Foundry-*-macOS-${{ matrix.arch }}.zip
+            release/*.blockmap
+            release/SHA256SUMS-macOS-${{ matrix.arch }}.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - windows
+      - macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release notes
+        uses: actions/checkout@v6
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: idea-foundry-*
+          path: release
+          merge-multiple: true
+      - name: Write combined release checksums
+        shell: bash
+        run: |
+          cd release
+          sha256sum Idea-Foundry-*.exe Idea-Foundry-*.dmg Idea-Foundry-*.zip > SHA256SUMS.txt
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          notes="docs/release-notes-$GITHUB_REF_NAME.md"
+          test -f "$notes" || { echo "Missing $notes." >&2; exit 1; }
+          mapfile -t files < <(find release -maxdepth 1 -type f \( -name 'Idea-Foundry-*.exe' -o -name 'Idea-Foundry-*.dmg' -o -name 'Idea-Foundry-*.zip' -o -name 'SHA256SUMS.txt' \) -print | sort)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "Idea Foundry $GITHUB_REF_NAME" --notes-file "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "Idea Foundry $GITHUB_REF_NAME" --notes-file "$notes"
+          fi
