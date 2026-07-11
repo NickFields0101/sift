@@ -6,7 +6,9 @@ import sharp from "sharp";
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const markPath = path.join(projectDirectory, "public", "brand", "sift-mark.svg");
+const detailedTornadoPath = path.join(projectDirectory, "public", "brand", "sift-hero.png");
 const markSource = await fs.readFile(markPath);
+const detailedTornadoSource = await fs.readFile(detailedTornadoPath);
 
 const transparentMark = await sharp(markSource)
   .resize(1024, 1024, { fit: "contain" })
@@ -15,12 +17,24 @@ const transparentMark = await sharp(markSource)
 
 const iconBackdrop = Buffer.from(`
   <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024">
+    <defs>
+      <radialGradient id="sift-icon-glow" cx="50%" cy="47%" r="57%">
+        <stop offset="0%" stop-color="#31531a" stop-opacity="0.72"/>
+        <stop offset="54%" stop-color="#17210f" stop-opacity="0.58"/>
+        <stop offset="100%" stop-color="#080a08" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
     <rect x="48" y="48" width="928" height="928" rx="224" fill="#080a08"/>
-    <rect x="49" y="49" width="926" height="926" rx="223" fill="none" stroke="#232722" stroke-width="2"/>
+    <rect x="48" y="48" width="928" height="928" rx="224" fill="url(#sift-icon-glow)"/>
+    <rect x="49" y="49" width="926" height="926" rx="223" fill="none" stroke="#30382b" stroke-width="2"/>
   </svg>
 `);
-const iconMark = await sharp(markSource)
-  .resize(704, 704, { fit: "contain" })
+const iconMark = await sharp(detailedTornadoSource)
+  .trim()
+  .resize(800, 800, {
+    fit: "contain",
+    background: { r: 0, g: 0, b: 0, alpha: 0 },
+  })
   .png()
   .toBuffer();
 const appIcon = await sharp({
@@ -28,7 +42,7 @@ const appIcon = await sharp({
 })
   .composite([
     { input: iconBackdrop, left: 0, top: 0 },
-    { input: iconMark, left: 160, top: 160 },
+    { input: iconMark, left: 112, top: 112 },
   ])
   .png()
   .toBuffer();
