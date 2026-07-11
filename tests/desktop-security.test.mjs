@@ -10,7 +10,8 @@ test("desktop renderer has no direct network authority", async () => {
   assert.match(html, /connect-src 'none'/);
   assert.match(html, /object-src 'none'/);
   assert.match(html, /frame-ancestors 'none'/);
-  assert.match(preload, /contextBridge\.exposeInMainWorld\("ideaFoundry"/);
+  assert.match(preload, /contextBridge\.exposeInMainWorld\("sift"/);
+  assert.doesNotMatch(preload, /idea-foundry:/);
   assert.match(preload, /desktop:\s*true/);
   assert.doesNotMatch(preload, /ipcRenderer\.on|ipcRenderer\.send|exposeInMainWorld\([^)]*ipcRenderer/);
 });
@@ -25,7 +26,9 @@ test("desktop main process isolates the UI and protects credentials", async () =
   assert.match(main, /safeStorage\.encryptString/);
   assert.match(main, /encryptedApiKey/);
   assert.match(main, /app\.setName\("Idea Foundry"\)/);
-  assert.match(main, /app\.setPath\("userData", path\.join\(app\.getPath\("appData"\), "Idea Foundry"\)\)/);
+  assert.match(main, /const stableUserDataPath = path\.join\(app\.getPath\("appData"\), "Idea Foundry"\)/);
+  assert.match(main, /mkdirSync\(stableUserDataPath, \{ recursive: true \}\)[^]*app\.setPath\("userData", stableUserDataPath\)/);
+  assert.doesNotMatch(main, /idea-foundry:/);
   assert.doesNotMatch(main, /localStorage|sessionStorage/);
 });
 
@@ -183,7 +186,7 @@ test("raw personality responses are session-only and excluded from projects and 
 
   const clearStart = page.indexOf("function clearPersonalityDraft");
   const clearEnd = page.indexOf("function chooseProfileMode", clearStart);
-  assert.match(page.slice(clearStart, clearEnd), /sessionStorage\.removeItem\(PERSONALITY_DRAFT_KEY\)/);
+  assert.match(page.slice(clearStart, clearEnd), /removeCurrentAndLegacyStorageValues\([^]*sessionStorage[^]*PERSONALITY_DRAFT_KEY[^]*PRE_SIFT_PERSONALITY_DRAFT_KEY/);
   const applyStart = page.indexOf("function applyPersonalityAssessment");
   const applyEnd = page.indexOf("function removePersonalityAssessment", applyStart);
   assert.match(page.slice(applyStart, applyEnd), /clearPersonalityDraft\(\)/);
@@ -201,11 +204,13 @@ test("hydration and import project personality data onto a derived-only schema",
   assert.match(personality, /Unknown keys \(including any raw responses\)[^]*are discarded/);
   assert.match(personality, /promptSummary: buildPersonalityPromptSummary/);
 
-  const hydrationStart = page.indexOf("const saved = localStorage.getItem(STORAGE_KEY)");
-  const hydrationEnd = page.indexOf("const saved = sessionStorage.getItem(PERSONALITY_DRAFT_KEY)", hydrationStart);
+  const hydrationStart = page.indexOf("const candidate = readStorageValueCandidate(");
+  const hydrationEnd = page.indexOf("const candidate = readStorageValueCandidate(", hydrationStart + 1);
+  assert.ok(hydrationStart >= 0 && hydrationEnd > hydrationStart);
   const hydration = page.slice(hydrationStart, hydrationEnd);
   assert.match(hydration, /sanitizeGenerationProfile\(parsed\.profile, true\)/);
   assert.match(hydration, /sanitizeReviewInput\(parsed\?\.review\)/);
+  assert.match(hydration, /commitStorageMigration\([^]*PRE_SIFT_PROJECT_STORAGE_KEY/);
   assert.doesNotMatch(hydration, /setState\(\{\s*\.\.\.parsed/);
 
   const importStart = page.indexOf("function importPacket");
@@ -262,7 +267,7 @@ test("workspace reset and import purge ephemeral AI source material", async () =
   const importStart = page.indexOf("function importPacket");
   const importEnd = page.indexOf("async function copyText", importStart);
   assert.match(page.slice(importStart, importEnd), /resetAiWorkspace\(\)/);
-  assert.match(page, /localStorage\.removeItem\(STORAGE_KEY\);[^]*resetAiWorkspace\(\)/);
+  assert.match(page, /removeCurrentAndLegacyStorageValues\([^]*localStorage[^]*STORAGE_KEY[^]*PRE_SIFT_PROJECT_STORAGE_KEY[^]*resetAiWorkspace\(\)/);
   assert.match(page, /currentEvidenceVerificationFingerprint/);
   assert.match(page, /reviewerVerified: evidenceHumanVerificationCurrent/);
 });
@@ -354,6 +359,12 @@ test("OpenRouter keys stay encrypted, provider-bound, and pinned to OpenRouter",
 });
 
 test("tag builds cannot publish before the release workflow validates every platform", async () => {
-  const packager = await readFile(new URL("../scripts/package-desktop.mjs", import.meta.url), "utf8");
+  const [packager, workflow] = await Promise.all([
+    readFile(new URL("../scripts/package-desktop.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../.github/workflows/desktop-release.yml", import.meta.url), "utf8"),
+  ]);
   assert.match(packager, /publish:\s*["']never["']/);
+  assert.match(workflow, /name: Lint source[^]*run: npm run lint/);
+  assert.match(workflow, /name: Launch packaged app with a clean profile[^]*SIFT-Portable-\*\.exe[^]*Get-Process -Name SIFT[^]*SIFT exited during the clean-profile launch check[^]*Stop-Process/);
+  assert.match(workflow, /publish:[^]*needs:[^]*- windows[^]*- macos/);
 });

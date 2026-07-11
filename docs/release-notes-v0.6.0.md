@@ -12,6 +12,13 @@ Version 0.6.0 turns SIFT into a fuller local Xahau/Evernode venture workspace wh
 - Complete SIFT visual identity, updated tornado assets, polished light/dark themes, responsive layouts, and friendlier OpenRouter model search.
 - Windows installer and portable packages use the SIFT product name. macOS Intel and Apple-silicon packages are built through the release workflow.
 
+## Upgrading to SIFT
+
+- Existing desktop projects and protected model settings remain available. SIFT keeps the established installer, bundle, and user-data identities internally so an upgrade does not create a second Windows installation or abandon encrypted credentials.
+- Browser project data and unfinished personality drafts move automatically to SIFT storage keys on first use.
+- On macOS, drag `SIFT.app` into Applications. After confirming the new app opens and your project is present, remove the pre-SIFT app bundle if it is still shown separately. Do not delete its Application Support data.
+- The release files, shortcuts, window titles, executable metadata, and all current documentation now use the SIFT name.
+
 ## Important boundaries
 
 - Research & Run currently requires a user-supplied OpenRouter API key and credits. Model-token and web-search charges apply.

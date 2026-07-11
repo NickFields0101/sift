@@ -20,7 +20,7 @@ const themeBootstrap = `(function(){try{var t=localStorage.getItem("sift-theme-v
 const configuredSiteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
 const metadataBase = new URL(
   configuredSiteUrl ||
-    "https://xahau-evernode-idea-foundry.allmoneyinrollin40.chatgpt.site",
+    "https://github.com/NickFields0101/sift",
 );
 
 export const metadata: Metadata = {

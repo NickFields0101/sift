@@ -5,23 +5,23 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 const CHANNELS = Object.freeze({
-  version: "idea-foundry:version",
-  openExternal: "idea-foundry:open-external",
-  getConfig: "idea-foundry:llm:get-config",
-  saveConfig: "idea-foundry:llm:save-config",
-  clearConfig: "idea-foundry:llm:clear-config",
-  testConnection: "idea-foundry:llm:test-connection",
-  listModels: "idea-foundry:llm:list-models",
-  generateIdeas: "idea-foundry:llm:generate-ideas",
-  draftEvaluation: "idea-foundry:llm:draft-evaluation",
-  extractEvidence: "idea-foundry:llm:extract-evidence",
-  researchEvidence: "idea-foundry:llm:research-evidence",
-  buildCatalog: "idea-foundry:build:catalog",
-  buildDetect: "idea-foundry:build:detect",
-  buildRun: "idea-foundry:build:run",
+  version: "sift:version",
+  openExternal: "sift:open-external",
+  getConfig: "sift:llm:get-config",
+  saveConfig: "sift:llm:save-config",
+  clearConfig: "sift:llm:clear-config",
+  testConnection: "sift:llm:test-connection",
+  listModels: "sift:llm:list-models",
+  generateIdeas: "sift:llm:generate-ideas",
+  draftEvaluation: "sift:llm:draft-evaluation",
+  extractEvidence: "sift:llm:extract-evidence",
+  researchEvidence: "sift:llm:research-evidence",
+  buildCatalog: "sift:build:catalog",
+  buildDetect: "sift:build:detect",
+  buildRun: "sift:build:run",
 });
 
-contextBridge.exposeInMainWorld("ideaFoundry", Object.freeze({
+contextBridge.exposeInMainWorld("sift", Object.freeze({
   desktop: true,
   app: Object.freeze({
     getVersion: () => ipcRenderer.invoke(CHANNELS.version),

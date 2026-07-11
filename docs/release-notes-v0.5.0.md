@@ -1,4 +1,4 @@
-# Idea Foundry v0.5.0
+# SIFT v0.5.0 (legacy package)
 
 Version 0.5.0 adds an optional research-based Big Five profile and an AI one-click outcome preview while preserving the locked, local review engine.
 

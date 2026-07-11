@@ -1,10 +1,10 @@
-# Idea Foundry v0.4.0
+# SIFT v0.4.0 (legacy package)
 
 Version 0.4.0 makes the desktop app faster to understand, much easier to connect to OpenRouter, and able to assist with evaluation and evidence preparation while preserving the locked deterministic scoring engine.
 
 ## What changed
 
-- Added live OpenRouter model typeahead. Enter a name, version, or partial canonical ID—such as `4.8` or `opus.4.8`—and Idea Foundry queries OpenRouter automatically, ranks the response, and shows the best matches in a keyboard-accessible dropdown.
+- Added live OpenRouter model typeahead. Enter a name, version, or partial canonical ID—such as `4.8` or `opus.4.8`—and SIFT queries OpenRouter automatically, ranks the response, and shows the best matches in a keyboard-accessible dropdown.
 - Added punctuation-tolerant model matching, so dots, hyphens, underscores, and slashes behave naturally without hard-coded model names.
 - Simplified the primary workflow to **Home → Ideas → Evaluate → Evidence → Decision**.
 - Moved personalization, AI connection, and import/export tools into a compact **Settings & data** drawer.
@@ -13,7 +13,7 @@ Version 0.4.0 makes the desktop app faster to understand, much easier to connect
 - Added an optional desktop **Draft evaluation** workflow for connected local or cloud models. It proposes merits and rationales for unanswered claims plus gate recommendations, but applies nothing until the user approves it. Gate proposals are applied one at a time.
 - Added an optional desktop **Organize evidence** workflow. It converts pasted source material into reviewable artifact proposals and locally confirms that every proposed excerpt appears in the supplied text.
 - Added one-click undo for approved AI-assisted evaluation and evidence changes.
-- Added the new Idea Foundry logo, application icon, and transparent mark to the web interface and native Windows/macOS build resources.
+- Added the release's logo, application icon, and transparent mark to the web interface and native Windows/macOS build resources.
 - Preserved manual model-ID entry and full-catalog browsing as advanced fallbacks.
 
 ## Integrity and security

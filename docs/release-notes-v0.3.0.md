@@ -1,6 +1,6 @@
-# Idea Foundry v0.3.0
+# SIFT v0.3.0 (legacy package)
 
-Idea Foundry now runs on macOS and makes large model catalogs much easier to navigate.
+This historical release added macOS support and made large model catalogs much easier to navigate.
 
 ## What changed
 
@@ -18,17 +18,17 @@ Idea Foundry now runs on macOS and makes large model catalogs much easier to nav
 | Intel Mac | `Idea-Foundry-0.3.0-macOS-x64.dmg` | `Idea-Foundry-0.3.0-macOS-x64.zip` |
 | Windows x64 | `Idea-Foundry-Setup-0.3.0-x64.exe` | `Idea-Foundry-Portable-0.3.0-x64.exe` |
 
-macOS 12 Monterey or newer is required. Open a DMG and drag Idea Foundry into Applications. ZIP files are provided for manual deployment.
+macOS 12 Monterey or newer is required. Open a DMG and drag the app into Applications. ZIP files are provided for manual deployment.
 
 ## Signing notice
 
-These first macOS packages are not yet signed or notarized. After verifying the download against `SHA256SUMS.txt`, macOS may require you to right-click Idea Foundry, choose **Open**, and confirm, or approve it under **System Settings → Privacy & Security**. Do not disable Gatekeeper globally.
+These first macOS packages are not yet signed or notarized. After verifying the download against `SHA256SUMS.txt`, macOS may require you to right-click the app, choose **Open**, and confirm, or approve it under **System Settings → Privacy & Security**. Do not disable Gatekeeper globally.
 
 The Windows packages also remain unsigned and may show a Microsoft SmartScreen warning.
 
 ## Privacy and model connections
 
-- Idea Foundry itself requires no account.
+- SIFT itself requires no account.
 - OpenRouter requires the user's own account, API key, and credits.
 - API keys remain encrypted by the operating system, bound to their selected provider, and excluded from project files, exports, and browser storage.
 - OpenRouter stays pinned to `https://openrouter.ai/api/v1`.

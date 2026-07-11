@@ -10,7 +10,7 @@ if (!root) {
   throw new Error("SIFT could not find its renderer root element.");
 }
 
-document.documentElement.dataset.runtime = window.ideaFoundry?.desktop ? "desktop" : "browser";
+document.documentElement.dataset.runtime = window.sift?.desktop ? "desktop" : "browser";
 const savedTheme = localStorage.getItem("sift-theme-v1");
 const initialTheme = savedTheme === "light" || savedTheme === "dark"
   ? savedTheme

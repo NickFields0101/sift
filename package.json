@@ -3,6 +3,14 @@
   "version": "0.6.0",
   "description": "SIFT: local-first deterministic idea generation and evidence validation for Xahau and Evernode.",
   "author": "Nick Fields",
+  "homepage": "https://github.com/NickFields0101/sift#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NickFields0101/sift.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NickFields0101/sift/issues"
+  },
   "private": true,
   "main": "desktop/main.mjs",
   "engines": {
@@ -14,7 +22,7 @@
     "start": "vinext start",
     "preview": "node scripts/preview-local.mjs",
     "pretest": "vinext build",
-    "test": "node --test tests/scoring.test.ts tests/ai-assistance.test.ts tests/research-run.test.ts tests/quick-run.test.ts tests/model-search.test.ts tests/personality.test.ts tests/llm-core.test.mjs tests/build-tools.test.mjs tests/desktop-security.test.mjs tests/rendered-html.test.mjs",
+    "test": "node --test tests/scoring.test.ts tests/ai-assistance.test.ts tests/research-run.test.ts tests/quick-run.test.ts tests/model-search.test.ts tests/personality.test.ts tests/storage-migration.test.ts tests/llm-core.test.mjs tests/build-tools.test.mjs tests/desktop-security.test.mjs tests/rendered-html.test.mjs",
     "desktop:build": "vite build --config vite.desktop.config.ts",
     "desktop:typecheck": "tsc -p tsconfig.desktop.json",
     "predesktop:run": "npm run desktop:build",

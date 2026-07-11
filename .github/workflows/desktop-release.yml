@@ -25,6 +25,8 @@ jobs:
         run: npm ci
       - name: Type-check desktop renderer
         run: npm run desktop:typecheck
+      - name: Lint source
+        run: npm run lint
       - name: Run deterministic, connector, security, and rendering tests
         run: npm test
       - name: Require release tag to match package version
@@ -53,6 +55,24 @@ jobs:
         run: npm ci
       - name: Build installer and portable executable
         run: npm run desktop:package:win
+      - name: Launch packaged app with a clean profile
+        shell: pwsh
+        run: |
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP "sift-clean-appdata"
+          New-Item -ItemType Directory -Path $env:APPDATA -Force | Out-Null
+          $executable = Get-ChildItem -LiteralPath release -Filter "SIFT-Portable-*.exe" | Select-Object -First 1
+          if ($null -eq $executable) { throw "The SIFT portable executable was not found." }
+          $before = @(Get-Process -Name SIFT -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+          $launcher = Start-Process -FilePath $executable.FullName -PassThru -WindowStyle Hidden
+          $started = @()
+          try {
+            Start-Sleep -Seconds 8
+            $started = @(Get-Process -Name SIFT -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $before })
+            if ($started.Count -eq 0) { throw "SIFT exited during the clean-profile launch check." }
+          } finally {
+            if (!$launcher.HasExited) { Stop-Process -Id $launcher.Id -Force }
+            $started | Stop-Process -Force -ErrorAction SilentlyContinue
+          }
       - name: Write Windows checksums
         shell: pwsh
         run: |

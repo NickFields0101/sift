@@ -1,25 +1,23 @@
 # SIFT — Xahau + Evernode
 
-SIFT (formerly Idea Foundry) is a local-first, optional-AI venture workspace for Xahau and Evernode projects. It moves a founder from a broad search profile to falsifiable candidates, helps organize a review, calculates stage readiness with a locked 51-claim rubric, and carries the selected opportunity into a guarded local Build workspace.
+SIFT is a local-first, optional-AI venture workspace for Xahau and Evernode projects. It moves a founder from a broad search profile to falsifiable candidates, helps organize a review, calculates stage readiness with a locked 51-claim rubric, and carries the selected opportunity into a guarded local Build workspace.
 
 No account or ChatGPT sign-in is required in the desktop edition.
 
 ## Download and install on Windows
 
-Download the latest files from [GitHub Releases](https://github.com/NickFields0101/idea-foundry/releases/latest).
+Download the latest files from [SIFT Releases](https://github.com/NickFields0101/sift/releases/latest).
 
-- **Installer:** download `Idea-Foundry-Setup-0.5.0-x64.exe`, double-click it, choose an install folder, and launch the app from the desktop or Start menu.
-- **Portable:** download `Idea-Foundry-Portable-0.5.0-x64.exe` and double-click it. It runs without installing anything.
-
-Version `0.5.0` predates the visible SIFT rebrand, so its published files retain the Idea Foundry name. New packages use `SIFT-Setup-<version>-x64.exe` and `SIFT-Portable-<version>-x64.exe`.
+- **Installer:** download `SIFT-Setup-0.6.0-x64.exe`, double-click it, choose an install folder, and launch SIFT from the desktop or Start menu.
+- **Portable:** download `SIFT-Portable-0.6.0-x64.exe` and double-click it. It runs without installing anything.
 
 No app account, wallet, ChatGPT sign-in, or AI connection is required. The app works immediately with manual ideas and the starter slate. Connecting Ollama, LM Studio, OpenRouter, or another compatible model is optional. Choosing OpenRouter requires the user's own OpenRouter account, API key, and credits.
 
-Version `0.5.0` is not yet code-signed, so Windows SmartScreen may display an **Unknown publisher** warning. Verify the download against `SHA256SUMS.txt` on the release page before choosing **More info** and **Run anyway**. Organizations distributing the app broadly should code-sign future builds.
+Version `0.6.0` is not yet code-signed, so Windows SmartScreen may display an **Unknown publisher** warning. Verify the download against `SHA256SUMS.txt` on the release page before choosing **More info** and **Run anyway**. Organizations distributing the app broadly should code-sign future builds.
 
 ## Download and install on macOS
 
-Download the latest DMG from [GitHub Releases](https://github.com/NickFields0101/idea-foundry/releases/latest). Choose `arm64` for Apple silicon Macs or `x64` for Intel Macs running macOS 12 Monterey or newer, open the DMG, and drag the app into Applications. ZIP packages are also provided for manual deployment.
+Download the latest DMG from [SIFT Releases](https://github.com/NickFields0101/sift/releases/latest). Choose `arm64` for Apple silicon Macs or `x64` for Intel Macs running macOS 12 Monterey or newer, open the DMG, and drag SIFT into Applications. ZIP packages are also provided for manual deployment.
 
 The current macOS packages are unsigned and not notarized. Verify `SHA256SUMS.txt`, then right-click the app and choose **Open** if Gatekeeper warns about an unidentified developer. Future broad distribution should use an Apple Developer ID certificate and notarization. See [macOS distribution](docs/macos-distribution.md) for build, architecture, signing, and release details.
 
