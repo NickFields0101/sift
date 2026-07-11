@@ -259,7 +259,7 @@ export interface BuildRunResult {
   advisory: true;
 }
 
-export interface IdeaFoundryBridge {
+export interface SiftBridge {
   desktop: boolean;
   app: {
     getVersion(): Promise<string>;
@@ -286,6 +286,6 @@ export interface IdeaFoundryBridge {
 
 declare global {
   interface Window {
-    ideaFoundry?: IdeaFoundryBridge;
+    sift?: SiftBridge;
   }
 }

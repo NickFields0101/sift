@@ -1,4 +1,4 @@
-# Idea Foundry v0.4.1
+# SIFT v0.4.1 (legacy package)
 
 Version 0.4.1 adds an optional guided Quick Run and fixes AI connection state after local data is cleared.
 

@@ -36,6 +36,15 @@ import { applyEvaluationProposals, applyEvidenceProposals, sourceContentSha256 }
 import { buildQuickRunPreview, type QuickRunPreview } from "./lib/quick-run";
 import { addResearchToQuickRunPreview, applyResearchEvidenceBatch } from "./lib/research-run";
 import {
+  PRE_SIFT_PERSONALITY_DRAFT_KEY,
+  PRE_SIFT_PROJECT_STORAGE_KEY,
+  commitStorageMigration,
+  readStorageValueCandidate,
+  removeCurrentAndLegacyStorageValues,
+  SIFT_PERSONALITY_DRAFT_KEY,
+  SIFT_PROJECT_STORAGE_KEY,
+} from "./lib/storage-migration";
+import {
   IPIP_NEO_120_ITEMS,
   IPIP_NEO_120_RESPONSE_OPTIONS,
   IPIP_NEO_120_SOURCE,
@@ -64,7 +73,7 @@ import type {
 } from "./desktop-bridge";
 
 function brandAssetUrl(filename: string) {
-  return typeof window !== "undefined" && window.ideaFoundry?.desktop
+  return typeof window !== "undefined" && window.sift?.desktop
     ? `./${filename}`
     : `/brand/${filename}`;
 }
@@ -74,7 +83,7 @@ const SIFT_HERO_URL = brandAssetUrl("sift-hero.png");
 const SIFT_BRAND_TORNADO_URL = brandAssetUrl("sift-brand-tornado.png");
 const SIFT_WORDMARK_LIGHT_URL = brandAssetUrl("sift-wordmark-light.png");
 const SIFT_WORDMARK_DARK_URL = brandAssetUrl("sift-wordmark-dark.png");
-const PERSONALITY_DRAFT_KEY = "idea-foundry-ipip-neo-120-draft-v1";
+const PERSONALITY_DRAFT_KEY = SIFT_PERSONALITY_DRAFT_KEY;
 const PERSONALITY_ITEMS_PER_PAGE = 10;
 const THEME_KEY = "sift-theme-v1";
 const EVIDENCE_GRADE_LABELS: Record<EvidenceGrade, string> = {
@@ -190,7 +199,7 @@ interface AppState {
   review: ReviewInput;
 }
 
-const STORAGE_KEY = "idea-foundry-v1";
+const STORAGE_KEY = SIFT_PROJECT_STORAGE_KEY;
 
 const LLM_PROVIDERS: Record<LlmProvider, {
   label: string;
@@ -954,7 +963,7 @@ export default function Home() {
   const modelConfigRequestRef = useRef(0);
   const clearingLocalDataRef = useRef(false);
   const [evidenceDraft, setEvidenceDraft] = useState(emptyManualEvidenceDraft);
-  const desktopAvailable = typeof window === "undefined" ? null : window.ideaFoundry?.desktop === true;
+  const desktopAvailable = typeof window === "undefined" ? null : window.sift?.desktop === true;
   const selectedLlmProvider = LLM_PROVIDERS[llmConfig.provider];
   const llmUsesRemoteEndpoint = !isLoopbackEndpoint(llmConfig.baseUrl);
   const llmSavedKeyAvailable = Boolean(
@@ -993,7 +1002,7 @@ export default function Home() {
   }, [theme]);
 
   useEffect(() => {
-    const bridge = window.ideaFoundry;
+    const bridge = window.sift;
     if (!bridge?.desktop) return;
 
     let cancelled = false;
@@ -1024,10 +1033,14 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
+    const candidate = readStorageValueCandidate(
+      localStorage,
+      STORAGE_KEY,
+      [PRE_SIFT_PROJECT_STORAGE_KEY],
+    );
+    if (candidate) {
       try {
-        const parsed = recordFrom(JSON.parse(saved));
+        const parsed = recordFrom(JSON.parse(candidate.value));
         const review = sanitizeReviewInput(parsed?.review);
         if (parsed && review?.claims.length === RUBRIC.length) {
           const fallback = defaultState();
@@ -1040,19 +1053,33 @@ export default function Home() {
             ideas: sanitizeIdeaCandidates(parsed.ideas),
             review,
           });
+          commitStorageMigration(
+            localStorage,
+            STORAGE_KEY,
+            [PRE_SIFT_PROJECT_STORAGE_KEY],
+            candidate,
+          );
         }
       } catch {
-        localStorage.removeItem(STORAGE_KEY);
+        removeCurrentAndLegacyStorageValues(
+          localStorage,
+          STORAGE_KEY,
+          [PRE_SIFT_PROJECT_STORAGE_KEY],
+        );
       }
     }
     setHydrated(true);
   }, []);
 
   useEffect(() => {
-    const saved = sessionStorage.getItem(PERSONALITY_DRAFT_KEY);
-    if (saved) {
+    const candidate = readStorageValueCandidate(
+      sessionStorage,
+      PERSONALITY_DRAFT_KEY,
+      [PRE_SIFT_PERSONALITY_DRAFT_KEY],
+    );
+    if (candidate) {
       try {
-        const parsed = JSON.parse(saved) as Record<string, unknown>;
+        const parsed = JSON.parse(candidate.value) as Record<string, unknown>;
         const normalized = Object.fromEntries(
           Object.entries(parsed)
             .map(([id, response]) => [Number(id), Number(response)] as const)
@@ -1073,8 +1100,18 @@ export default function Home() {
           const firstMissing = IPIP_NEO_120_ITEMS.find((item) => normalized[item.id] === undefined)?.id ?? 1;
           setPersonalityPage(Math.floor((firstMissing - 1) / PERSONALITY_ITEMS_PER_PAGE));
         }
+        commitStorageMigration(
+          sessionStorage,
+          PERSONALITY_DRAFT_KEY,
+          [PRE_SIFT_PERSONALITY_DRAFT_KEY],
+          candidate,
+        );
       } catch {
-        sessionStorage.removeItem(PERSONALITY_DRAFT_KEY);
+        removeCurrentAndLegacyStorageValues(
+          sessionStorage,
+          PERSONALITY_DRAFT_KEY,
+          [PRE_SIFT_PERSONALITY_DRAFT_KEY],
+        );
       }
     }
     setPersonalityDraftHydrated(true);
@@ -1273,7 +1310,11 @@ export default function Home() {
   }
 
   function clearPersonalityDraft() {
-    sessionStorage.removeItem(PERSONALITY_DRAFT_KEY);
+    removeCurrentAndLegacyStorageValues(
+      sessionStorage,
+      PERSONALITY_DRAFT_KEY,
+      [PRE_SIFT_PERSONALITY_DRAFT_KEY],
+    );
     setPersonalityAnswers({});
     setPersonalityPage(0);
     setPersonalityTaking(false);
@@ -1291,7 +1332,11 @@ export default function Home() {
       setPersonalityAnswers({});
       setPersonalityCandidate(null);
       setPersonalityPage(0);
-      sessionStorage.removeItem(PERSONALITY_DRAFT_KEY);
+      removeCurrentAndLegacyStorageValues(
+        sessionStorage,
+        PERSONALITY_DRAFT_KEY,
+        [PRE_SIFT_PERSONALITY_DRAFT_KEY],
+      );
     }
     setPersonalityTaking(true);
   }
@@ -1335,7 +1380,11 @@ export default function Home() {
   }
 
   function clearProjectData() {
-    localStorage.removeItem(STORAGE_KEY);
+    removeCurrentAndLegacyStorageValues(
+      localStorage,
+      STORAGE_KEY,
+      [PRE_SIFT_PROJECT_STORAGE_KEY],
+    );
     clearPersonalityDraft();
     resetAiWorkspace();
     setImportText("");
@@ -1347,7 +1396,7 @@ export default function Home() {
   async function clearAllLocalData() {
     if (clearingLocalDataRef.current) return;
     if (!window.confirm("Clear this project and forget the saved AI connection and protected API key on this computer?")) return;
-    const bridge = window.ideaFoundry;
+    const bridge = window.sift;
     clearingLocalDataRef.current = true;
     setClearingLocalData(true);
     try {
@@ -1463,7 +1512,7 @@ export default function Home() {
 
   async function connectLlm() {
     if (clearingLocalDataRef.current) return;
-    const bridge = window.ideaFoundry;
+    const bridge = window.sift;
     if (!bridge?.desktop) throw new Error("The model connector is available in the desktop app.");
     const requestId = ++modelConfigRequestRef.current;
     setLlmBusy("saving");
@@ -1493,7 +1542,7 @@ export default function Home() {
 
   async function loadLlmModels({ query = "", background = false, apiKeyOverride }: { query?: string; background?: boolean; apiKeyOverride?: string } = {}) {
     if (clearingLocalDataRef.current) return;
-    const bridge = window.ideaFoundry;
+    const bridge = window.sift;
     if (!bridge?.desktop) return;
     const requestId = ++modelSearchRequestRef.current;
     if (background) setModelSearchBusy(true);
@@ -1597,7 +1646,7 @@ export default function Home() {
 
   async function generateWithConnectedLlm() {
     if (clearingLocalDataRef.current) return;
-    const bridge = window.ideaFoundry;
+    const bridge = window.sift;
     if (!bridge?.desktop) {
       setSection("model");
       return;
@@ -2241,7 +2290,7 @@ export default function Home() {
 
   async function saveAiConnectionOrOpenSettings() {
     if (clearingLocalDataRef.current) return null;
-    const bridge = window.ideaFoundry;
+    const bridge = window.sift;
     if (!bridge?.desktop) {
       setSection("model");
       return null;
@@ -3941,7 +3990,7 @@ function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNaviga
   }, [score, selectedIdea, state.project.domain, state.project.title, state.review.artifacts.length]);
 
   async function refreshTools() {
-    const bridge = window.ideaFoundry?.build;
+    const bridge = window.sift?.build;
     if (!bridge) return;
     setChecking(true);
     setBuildError("");
@@ -3967,7 +4016,7 @@ function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNaviga
   }
 
   async function runBuildAction(toolId: BuildToolId, capability: BuildCapability, args: Record<string, unknown> = {}) {
-    const bridge = window.ideaFoundry?.build;
+    const bridge = window.sift?.build;
     if (!bridge) {
       setBuildError("Local tools run only in the SIFT desktop app.");
       return;
@@ -3987,7 +4036,7 @@ function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNaviga
   }
 
   function openBuildRepository(event: React.MouseEvent<HTMLAnchorElement>, url: string) {
-    const bridge = window.ideaFoundry;
+    const bridge = window.sift;
     if (!bridge?.desktop) return;
     event.preventDefault();
     void bridge.app.openExternal(url).catch((error: unknown) => {
