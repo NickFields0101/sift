@@ -53,11 +53,11 @@ test("selecting a different idea cannot inherit the prior idea's review or evide
   const freshReview = page.slice(freshStart, freshEnd);
   const beginReview = page.slice(beginStart, beginEnd);
   assert.match(freshReview, /\.\.\.defaultReview\(\)/);
-  assert.match(freshReview, /archetype: current\.archetype/);
+  assert.doesNotMatch(freshReview, /current\.archetype/);
   assert.match(freshReview, /stage: "thesis"/);
   assert.match(beginReview, /const selectingDifferentIdea = state\.project\.selectedIdeaId !== idea\.id/);
   assert.match(beginReview, /reviewHasMaterialWork\(state\.review\)[^]*window\.confirm/);
-  assert.match(beginReview, /const review = selectingDifferentIdea \? freshIdeaScreenReview\(state\.review\) : state\.review/);
+  assert.match(beginReview, /const review = selectingDifferentIdea \? freshIdeaScreenReview\(\) : state\.review/);
   assert.match(beginReview, /review,\s*\}\)\)/);
   assert.match(beginReview, /draftQuickRunEvaluation\([^]*review,[^]*selectingDifferentIdea \? "" : evaluationNotes/);
   assert.doesNotMatch(freshReview, /artifacts:\s*current\.artifacts|claims:\s*current\.claims|gates:\s*current\.gates/);
@@ -112,10 +112,13 @@ test("Generate & Screen separates a fresh thesis decision from venture validatio
   const oneShot = page.slice(start, end);
 
   assert.match(oneShot, /setQuickRunMode\("one-shot"\)/);
-  assert.match(oneShot, /bridge\.llm\.generateIdeas\(/);
+  assert.match(oneShot, /generateQualitySlate\(connection, stateAtStart, 4/);
+  assert.match(page, /runIdeaForgeIntelligence\(/);
+  assert.match(page, /selectQualitySlate\(/);
+  assert.match(page, /engine: "python_multistage"/);
   assert.match(oneShot, /bridge\.llm\.draftEvaluation\(/);
   assert.match(oneShot, /bridge\.llm\.researchEvidence\(/);
-  assert.match(oneShot, /freshIdeaScreenReview\(stateAtStart\.review\)/);
+  assert.match(oneShot, /freshIdeaScreenReview\(\)/);
   assert.match(oneShot, /scope: "thesis_screen"/);
   assert.match(oneShot, /screenThesis\(finalPreview\.previewReview\)/);
   assert.match(oneShot, /contextResult \? publicContextSummaryFor\(contextResult\) : ""/);
@@ -412,6 +415,34 @@ test("AI evaluation and evidence IPC exposes proposal-only operations", async ()
   assert.match(core, /data_collection: "deny", zdr: true/);
   assert.doesNotMatch(core, /fetch\(citation|fetch\(sourceUrl|fetch\(item\.sourceUrl/);
   assert.doesNotMatch(core, /scoreReview|calculateGenerationPriority|EVIDENCE_MULTIPLIER/);
+});
+
+test("Python intelligence is a supervised proposal-only sidecar", async () => {
+  const [preload, main, bridge, worker, page, packageJson] = await Promise.all([
+    readFile(new URL("../desktop/preload.cjs", import.meta.url), "utf8"),
+    readFile(new URL("../desktop/main.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../desktop/intelligence-bridge.mjs", import.meta.url), "utf8"),
+    Promise.all([
+      readFile(new URL("../desktop/intelligence_worker/worker.py", import.meta.url), "utf8"),
+      readFile(new URL("../desktop/intelligence_worker/tasks.py", import.meta.url), "utf8"),
+    ]).then((parts) => parts.join("\n")),
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+  ]);
+  assert.match(preload, /intelligence:[^]*getStatus:[^]*start:[^]*getEvents:[^]*cancel:/);
+  assert.doesNotMatch(preload, /ipcRenderer\.on|ipcRenderer\.send/);
+  assert.match(main, /const config = await resolvedConfig\(\)[^]*intelligence\.start\(input, config\)/);
+  assert.match(bridge, /packaged apps never run a system Python/i);
+  assert.match(bridge, /minimalWorkerEnvironment/);
+  assert.match(bridge, /secretValues:[^]*model\.apiKey/);
+  assert.doesNotMatch(bridge, /shell:\s*true/);
+  assert.match(worker, /"provisional": True/);
+  assert.match(worker, /"customerValidation": False/);
+  assert.doesNotMatch(worker, /scoreReview|screenThesis|localStorage|safeStorage/);
+  assert.match(page, /intelligenceResult \? intelligenceContextSummary\(intelligenceResult\) : ""/);
+  assert.match(page, /screenThesis\(finalPreview\.previewReview\)/);
+  assert.match(packageJson, /desktop\/intelligence-runtime\/\$\{os\}-\$\{arch\}/);
+  assert.match(packageJson, /desktop\/intelligence-bridge\.mjs/);
 });
 
 test("OpenRouter keys stay encrypted, provider-bound, and pinned to OpenRouter", async () => {
