@@ -40,6 +40,7 @@ export const EVIDENCE_TYPES = [
 ] as const;
 
 export const GATE_IDS = ["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"] as const;
+export const THESIS_SCREEN_GATE_IDS = ["G1", "G2", "G7"] as const;
 const GATE_STATUSES = ["pass", "conditional", "fail", "unresolved", "not_due"] as const;
 const PROTOCOL_ROUTES: ProtocolRoute[] = [
   "unresolved",
@@ -54,6 +55,7 @@ export type Stage = (typeof STAGES)[number];
 export type EvidenceGrade = (typeof EVIDENCE_GRADES)[number];
 export type EvidenceType = (typeof EVIDENCE_TYPES)[number];
 export type GateId = (typeof GATE_IDS)[number];
+export type ThesisScreenGateId = (typeof THESIS_SCREEN_GATE_IDS)[number];
 export type GateStatus = "pass" | "conditional" | "fail" | "unresolved" | "not_due";
 export type ProtocolRoute =
   | "unresolved"
@@ -202,6 +204,40 @@ export interface ScoreOutput {
   gateBlockers: string[];
   categorySummaries: CategorySummary[];
   claimResults: ClaimResult[];
+}
+
+export type ThesisScreenDecision =
+  | "advance_to_validation"
+  | "revise_thesis"
+  | "park_idea"
+  | "incomplete";
+
+/**
+ * The thesis screen deliberately cannot receive evidence. It answers whether a
+ * hypothesis is worth validating, not whether the business has already been
+ * validated. Full ReviewInput objects remain structurally assignable, but only
+ * these projected fields are read or fingerprinted.
+ */
+export interface ThesisScreenInput {
+  archetype: Archetype;
+  claims: ReadonlyArray<Pick<ClaimAssessment, "claimId" | "merit">>;
+  gates: ReadonlyArray<Pick<GateAssessment, "id" | "status">>;
+}
+
+export interface ThesisScreenOutput {
+  engineVersion: string;
+  frameworkVersion: string;
+  rubricManifestSha256: string;
+  inputFingerprint: string;
+  archetype: Archetype;
+  lockedWeightTotal: number;
+  rawThesisScore: number;
+  decision: ThesisScreenDecision;
+  assessedClaims: number;
+  totalClaims: number;
+  gateStatuses: Record<ThesisScreenGateId, GateStatus | "missing">;
+  validationErrors: string[];
+  decisionReasons: string[];
 }
 
 export interface WeightedDimension {
@@ -551,6 +587,132 @@ export function createDefaultGates(): GateAssessment[] {
   }));
 }
 
+/**
+ * Screens the quality of a new business hypothesis with the locked archetype
+ * weights. Evidence grades, artifacts, policy caps, and validation-stage floors
+ * cannot affect this calculation. A positive result means "worth validating",
+ * never "validated" or "ready to launch".
+ */
+export function screenThesis(input: ThesisScreenInput): ThesisScreenOutput {
+  const validationErrors: string[] = [];
+  const decisionReasons: string[] = [];
+  const scoringArchetype = isArchetype(input.archetype) ? input.archetype : "application";
+  const knownClaimIds = new Set(RUBRIC.map((row) => row.claimId));
+  const claimIds = input.claims.map((claim) => claim.claimId);
+  const claimById = new Map(input.claims.map((claim) => [claim.claimId, claim]));
+
+  if (!isArchetype(input.archetype)) validationErrors.push("Archetype is invalid.");
+  const actualRubricManifestSha256 = calculateRubricManifestHash(RUBRIC);
+  if (actualRubricManifestSha256 !== RUBRIC_MANIFEST_SHA256) {
+    validationErrors.push(
+      `Canonical rubric manifest mismatch: expected ${RUBRIC_MANIFEST_SHA256}, got ${actualRubricManifestSha256}.`,
+    );
+  }
+  if (input.claims.length !== RUBRIC.length || new Set(claimIds).size !== RUBRIC.length) {
+    validationErrors.push(`The thesis screen must contain all ${RUBRIC.length} canonical claims exactly once.`);
+  }
+  for (const row of RUBRIC) if (!claimById.has(row.claimId)) validationErrors.push(`Claim ${row.claimId} is missing.`);
+  for (const claim of input.claims) if (!knownClaimIds.has(claim.claimId)) validationErrors.push(`Unknown claim ${claim.claimId}.`);
+
+  let lockedWeightTotal = 0;
+  let rawTotal = 0;
+  let assessedClaims = 0;
+  for (const row of RUBRIC) {
+    const assessment = claimById.get(row.claimId);
+    const configuredWeight = row.weights[scoringArchetype];
+    const weight = Number.isFinite(configuredWeight) && configuredWeight > 0 ? configuredWeight : 0;
+    lockedWeightTotal += weight;
+    if (weight === 0) validationErrors.push(`Claim ${row.claimId}: locked weight is invalid.`);
+
+    const merit = assessment?.merit;
+    const validMerit =
+      typeof merit === "number" &&
+      Number.isFinite(merit) &&
+      merit >= 0 &&
+      merit <= 5;
+    if (merit === null || merit === undefined) {
+      validationErrors.push(`Claim ${row.claimId} is unassessed.`);
+    } else if (!validMerit) {
+      validationErrors.push(`Claim ${row.claimId} merit must be between 0 and 5.`);
+    } else {
+      assessedClaims += 1;
+      rawTotal += weight * merit / 5;
+    }
+  }
+  if (Math.abs(lockedWeightTotal - 100) > 0.001) {
+    validationErrors.push(`Locked ${scoringArchetype} weights total ${lockedWeightTotal}, not 100.`);
+  }
+
+  const gateStatuses: ThesisScreenOutput["gateStatuses"] = {
+    G1: "missing",
+    G2: "missing",
+    G7: "missing",
+  };
+  for (const id of THESIS_SCREEN_GATE_IDS) {
+    const matching = input.gates.filter((gate) => gate.id === id);
+    if (matching.length !== 1) {
+      validationErrors.push(`${id} must appear exactly once in the thesis screen.`);
+      continue;
+    }
+    const status = matching[0].status;
+    if (!isGateStatus(status)) {
+      validationErrors.push(`${id} has an invalid status.`);
+      continue;
+    }
+    gateStatuses[id] = status;
+  }
+
+  const rawThesisScore = roundHalfEven(rawTotal, 1);
+  const unresolvedGates = THESIS_SCREEN_GATE_IDS.filter(
+    (id) => gateStatuses[id] !== "pass" && gateStatuses[id] !== "fail",
+  );
+  let decision: ThesisScreenDecision;
+  if (validationErrors.length > 0 || unresolvedGates.length > 0) {
+    decision = "incomplete";
+    decisionReasons.push(...validationErrors);
+    decisionReasons.push(...unresolvedGates.map((id) => `${id} needs a pass or fail thesis-screen decision.`));
+  } else if (gateStatuses.G1 === "fail" || rawThesisScore < 45) {
+    decision = "park_idea";
+    if (gateStatuses.G1 === "fail") decisionReasons.push("G1 integrity, legality, or harm screen failed.");
+    if (rawThesisScore < 45) decisionReasons.push("Raw Thesis Score is below 45.");
+  } else if (gateStatuses.G2 === "fail" || gateStatuses.G7 === "fail" || rawThesisScore < 60) {
+    decision = "revise_thesis";
+    if (gateStatuses.G2 === "fail") decisionReasons.push("G2 needs a more specific problem and actor.");
+    if (gateStatuses.G7 === "fail") decisionReasons.push("G7 needs a credible first validation and execution path.");
+    if (rawThesisScore < 60) decisionReasons.push("Raw Thesis Score is below the 60-point advance threshold.");
+  } else {
+    decision = "advance_to_validation";
+    decisionReasons.push("The thesis clears the 60-point screen and G1, G2, and G7 pass.");
+  }
+
+  const fingerprintProjection = {
+    archetype: input.archetype,
+    claims: input.claims
+      .map((claim) => ({ claimId: claim.claimId, merit: claim.merit }))
+      .sort((left, right) => left.claimId.localeCompare(right.claimId) || stableStringify(left).localeCompare(stableStringify(right))),
+    gates: input.gates
+      .filter((gate) => (THESIS_SCREEN_GATE_IDS as readonly string[]).includes(gate.id))
+      .map((gate) => ({ id: gate.id, status: gate.status }))
+      .sort((left, right) => left.id.localeCompare(right.id) || stableStringify(left).localeCompare(stableStringify(right))),
+  };
+
+  return {
+    engineVersion: ENGINE_VERSION,
+    frameworkVersion: FRAMEWORK_VERSION,
+    rubricManifestSha256: RUBRIC_MANIFEST_SHA256,
+    inputFingerprint: fnv1a(stableStringify(fingerprintProjection)),
+    archetype: scoringArchetype,
+    lockedWeightTotal: roundHalfEven(lockedWeightTotal, 3),
+    rawThesisScore,
+    decision,
+    assessedClaims,
+    totalClaims: RUBRIC.length,
+    gateStatuses,
+    validationErrors: unique(validationErrors),
+    decisionReasons: unique(decisionReasons),
+  };
+}
+
 export function validateGenerationProfile(profile: GenerationProfile) {
   const errors: string[] = [];
   if (profile.mode === "neutral") return errors;
@@ -748,7 +910,6 @@ export function scoreReview(input: ReviewInput): ScoreOutput {
   for (const row of RUBRIC) if (!claimById.has(row.claimId)) validationErrors.push(`Claim ${row.claimId} is missing.`);
   for (const claim of input.claims) if (!knownClaimIds.has(claim.claimId)) validationErrors.push(`Unknown claim ${claim.claimId}.`);
 
-  if (input.artifacts.length === 0) validationErrors.push("The evidence ledger must contain at least one row.");
   const evidencePairs = input.artifacts.map(
     (artifact) => `${normalizedId(artifact.evidenceClaimId)}|${normalizedId(artifact.artifactId)}`,
   );
@@ -990,21 +1151,23 @@ export function scoreReview(input: ReviewInput): ScoreOutput {
     );
   };
 
+  const stageRank = rankStage(scoringStage);
   let policyCap = 100;
-  const problemDirect =
-    claimPasses("1A", 2, DIRECT_CUSTOMER_TYPES) || claimPasses("1B", 2, DIRECT_CUSTOMER_TYPES);
-  const demandDirect = claimPasses("2B", 2, DIRECT_CUSTOMER_TYPES);
-  if (!problemDirect || !demandDirect) {
-    policyCap = Math.min(policyCap, 55);
-    warnings.push("Direct Problem/Demand evidence is missing: Validated Score is capped at 55.");
-  }
-  const committedDemand = claimPasses("2B", 3, COMMITTED_DEMAND_TYPES);
-  if (!committedDemand) {
-    policyCap = Math.min(policyCap, 70);
-    warnings.push("Committed or paid Demand evidence is missing: Validated Score is capped at 70.");
+  if (stageRank >= 1) {
+    const problemDirect =
+      claimPasses("1A", 2, DIRECT_CUSTOMER_TYPES) || claimPasses("1B", 2, DIRECT_CUSTOMER_TYPES);
+    const demandDirect = claimPasses("2B", 2, DIRECT_CUSTOMER_TYPES);
+    if (!problemDirect || !demandDirect) {
+      policyCap = Math.min(policyCap, 55);
+      warnings.push("Direct Problem/Demand evidence is missing: Validated Score is capped at 55.");
+    }
+    const committedDemand = claimPasses("2B", 3, COMMITTED_DEMAND_TYPES);
+    if (!committedDemand) {
+      policyCap = Math.min(policyCap, 70);
+      warnings.push("Committed or paid Demand evidence is missing: Validated Score is capped at 70.");
+    }
   }
   const policyAdjusted = Math.min(validatedTotal, policyCap);
-  const stageRank = rankStage(scoringStage);
 
   if (stageRank >= 1) {
     for (const id of ["1", "2"]) {

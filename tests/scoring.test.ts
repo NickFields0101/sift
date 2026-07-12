@@ -12,6 +12,7 @@ import type {
   ReviewInput,
   RubricRow,
   Stage,
+  ThesisScreenInput,
 } from "../app/lib/scoring";
 
 const scoringModuleUrl = new URL("../app/lib/scoring.ts", import.meta.url).href;
@@ -24,6 +25,7 @@ const {
   RUBRIC_MANIFEST_SHA256,
   STAGES,
   calculateGenerationPriority,
+  screenThesis,
   scoreReview,
 } = await import(scoringModuleUrl) as typeof import("../app/lib/scoring");
 
@@ -139,11 +141,6 @@ function buildReview(options: ReviewFixtureOptions = {}): ReviewInput {
     };
   });
 
-  // The canonical calculator requires a non-empty evidence ledger, even when all claims are E0.
-  if (artifacts.length === 0) {
-    artifacts.push(artifactFor("1A", "E0", "FounderAssertion", { suffix: "LEDGER-E0" }));
-  }
-
   return {
     archetype,
     stage,
@@ -154,6 +151,14 @@ function buildReview(options: ReviewFixtureOptions = {}): ReviewInput {
     claims,
     artifacts,
     gates: gatesFor(stage),
+  };
+}
+
+function thesisInput(merit: number): ThesisScreenInput {
+  return {
+    archetype: "application",
+    claims: RUBRIC.map((row) => ({ claimId: row.claimId, merit })),
+    gates: gatesFor("thesis"),
   };
 }
 
@@ -201,9 +206,11 @@ test("locks the canonical 51-claim manifest and 100-point archetype totals", () 
   }
 });
 
-test("all-E0 evidence preserves thesis merit but contributes no validation or confidence", () => {
-  const result = scoreReview(buildReview());
+test("an empty evidence ledger is a valid thesis state and creates no direct-evidence penalty", () => {
+  const input = buildReview();
+  const result = scoreReview(input);
 
+  assert.deepEqual(input.artifacts, []);
   assert.equal(result.official, true, result.validationErrors.join("\n"));
   assert.equal(result.assessedClaims, 51);
   assert.equal(result.totalClaims, 51);
@@ -213,7 +220,8 @@ test("all-E0 evidence preserves thesis merit but contributes no validation or co
   assert.equal(result.policyAdjustedValidatedScore, 0);
   assert.equal(result.evidenceConfidenceIndex, 0);
   assert.equal(result.verifiedEvidenceCoverage, 0);
-  assert.equal(result.policyCap, 55);
+  assert.equal(result.policyCap, 100);
+  assert.deepEqual(result.warnings, []);
   assert.equal(result.stageThresholdPassed, true);
   assert.equal(result.numericEligible, true);
   assert.equal(result.gateEligible, true);
@@ -267,6 +275,7 @@ test("Enterprise Discovery merit 4/E1 reproduces the rejected PowerShell calibra
 test("policy caps distinguish missing direct evidence from direct but uncommitted demand", async (t) => {
   await t.test("missing direct Problem/Demand evidence caps an otherwise 100 score at 55", () => {
     const result = scoreReview(buildReview({
+      stage: "discovery",
       claim: () => ({ merit: 5, grade: "E4", evidenceType: "Audit" }),
     }));
 
@@ -279,6 +288,7 @@ test("policy caps distinguish missing direct evidence from direct but uncommitte
 
   await t.test("direct observations without commitment cap the score at 70", () => {
     const result = scoreReview(buildReview({
+      stage: "discovery",
       claim: (row) => row.claimId === "1A" || row.claimId === "2B"
         ? { merit: 5, grade: "E3", evidenceType: "CustomerObservation" }
         : { merit: 5, grade: "E4", evidenceType: "Audit" },
@@ -291,6 +301,109 @@ test("policy caps distinguish missing direct evidence from direct but uncommitte
     assert.ok(result.warnings.some((warning) => warning.includes("capped at 70")));
     assert.ok(result.warnings.every((warning) => !warning.includes("capped at 55")));
   });
+});
+
+test("thesis screening scores hypothesis merit only and never reads evidence", () => {
+  const evidenceFree = buildReview({
+    claim: () => ({ merit: 3, grade: "E0", evidenceType: "FounderAssertion" }),
+  });
+  const before = clone(evidenceFree);
+  const initial = screenThesis(evidenceFree);
+
+  const withDeskResearch = clone(evidenceFree);
+  const artifact = artifactFor("1A", "E1", "DeskResearch", { suffix: "THESIS-RESEARCH" });
+  withDeskResearch.artifacts.push(artifact);
+  const claim = withDeskResearch.claims.find((item) => item.claimId === "1A");
+  assert.ok(claim);
+  claim.grade = "E1";
+  claim.evidenceClaimIds = [artifact.evidenceClaimId];
+  claim.evidenceArtifactIds = [artifact.artifactId];
+  const researched = screenThesis(withDeskResearch);
+
+  assert.deepEqual(evidenceFree, before, "the thesis scorer must not mutate its input");
+  assert.deepEqual(researched, initial, "evidence fields and artifacts must be outside the thesis formula");
+  assert.equal(initial.rawThesisScore, 60);
+  assert.equal(initial.decision, "advance_to_validation");
+  assert.equal(initial.assessedClaims, 51);
+  assert.equal(initial.lockedWeightTotal, 100);
+});
+
+test("thesis screen decisions use locked score bands and G1/G2/G7 only", async (t) => {
+  await t.test("score bands advance, revise, and park", () => {
+    const advance = screenThesis(thesisInput(3));
+    const revise = screenThesis(thesisInput(2.5));
+    const park = screenThesis(thesisInput(2));
+
+    assert.equal(advance.rawThesisScore, 60);
+    assert.equal(advance.decision, "advance_to_validation");
+    assert.equal(revise.rawThesisScore, 50);
+    assert.equal(revise.decision, "revise_thesis");
+    assert.equal(park.rawThesisScore, 40);
+    assert.equal(park.decision, "park_idea");
+  });
+
+  await t.test("G1 failure parks while G2 or G7 failure calls for revision", () => {
+    const g1 = thesisInput(3);
+    const g2 = thesisInput(3);
+    const g7 = thesisInput(3);
+    g1.gates.find((gate) => gate.id === "G1")!.status = "fail";
+    g2.gates.find((gate) => gate.id === "G2")!.status = "fail";
+    g7.gates.find((gate) => gate.id === "G7")!.status = "fail";
+
+    assert.equal(screenThesis(g1).decision, "park_idea");
+    assert.equal(screenThesis(g2).decision, "revise_thesis");
+    assert.equal(screenThesis(g7).decision, "revise_thesis");
+  });
+
+  await t.test("unresolved, conditional, missing, or unassessed inputs stay incomplete", () => {
+    const unresolved = thesisInput(3);
+    unresolved.gates.find((gate) => gate.id === "G2")!.status = "unresolved";
+    assert.equal(screenThesis(unresolved).decision, "incomplete");
+
+    const conditional = thesisInput(3);
+    conditional.gates.find((gate) => gate.id === "G7")!.status = "conditional";
+    assert.equal(screenThesis(conditional).decision, "incomplete");
+
+    const missingGate = thesisInput(3);
+    missingGate.gates = missingGate.gates.filter((gate) => gate.id !== "G1");
+    assert.equal(screenThesis(missingGate).decision, "incomplete");
+
+    const unassessed = thesisInput(3);
+    unassessed.claims = unassessed.claims.map((claim, index) => index === 0 ? { ...claim, merit: null } : claim);
+    const unassessedResult = screenThesis(unassessed);
+    assert.equal(unassessedResult.decision, "incomplete");
+    assert.equal(unassessedResult.assessedClaims, 50);
+  });
+});
+
+test("thesis screen fingerprints are deterministic and ignore irrelevant gate order", () => {
+  const firstInput = thesisInput(3.5);
+  const reordered = clone(firstInput);
+  reordered.claims.reverse();
+  reordered.gates.reverse();
+
+  const first = screenThesis(firstInput);
+  const second = screenThesis(reordered);
+  assert.deepEqual(second, first);
+  assert.equal(second.inputFingerprint, first.inputFingerprint);
+});
+
+test("strict Discovery scoring still blocks an evidence-free thesis without calling it malformed", () => {
+  const input = buildReview({
+    stage: "discovery",
+    claim: () => ({ merit: 5, grade: "E0", evidenceType: "FounderAssertion" }),
+  });
+  const result = scoreReview(input);
+
+  assert.deepEqual(input.artifacts, []);
+  assert.equal(result.official, true, result.validationErrors.join("\n"));
+  assert.equal(result.numericEligible, false);
+  assert.equal(result.verifiedEvidenceCoverage, 0);
+  assert.equal(result.policyCap, 55);
+  assert.ok(result.numericBlockers.some((blocker) => blocker.includes("1A lacks required evidence")));
+  assert.ok(result.numericBlockers.some((blocker) => blocker.includes("1B lacks required evidence")));
+  assert.ok(result.numericBlockers.some((blocker) => blocker.includes("2B lacks required direct-customer evidence")));
+  assert.ok(result.numericBlockers.some((blocker) => blocker.includes("Verified Coverage is below 35")));
 });
 
 test("evidence types enforce their canonical maximum grades", () => {

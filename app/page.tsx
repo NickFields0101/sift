@@ -19,6 +19,7 @@ import {
   calculateGenerationPriority,
   createDefaultGates,
   createEmptyClaims,
+  screenThesis,
   scoreReview,
   validateGenerationProfile,
   type Archetype,
@@ -31,6 +32,7 @@ import {
   type ProtocolRoute,
   type ReviewInput,
   type Stage,
+  type ThesisScreenOutput,
 } from "./lib/scoring";
 import { searchLlmModels } from "./lib/model-search";
 import { applyEvaluationProposals, applyEvidenceProposals, sourceContentSha256 } from "./lib/ai-assistance";
@@ -38,7 +40,6 @@ import { buildQuickRunPreview, type QuickRunPreview } from "./lib/quick-run";
 import {
   addResearchToQuickRunPreview,
   applyResearchEvidenceBatch,
-  completeAutomatedResearchRun,
 } from "./lib/research-run";
 import {
   PRE_SIFT_PERSONALITY_DRAFT_KEY,
@@ -148,6 +149,13 @@ interface QuickRunOutcomeState {
   kind: "one-shot" | "reviewed-research" | "preview";
   preview: QuickRunPreview;
   idea: IdeaCandidate;
+  thesisScreen?: ThesisScreenOutput;
+  contextResearch?: {
+    result?: ResearchEvidenceResult;
+    sourceCount: number;
+    claimCoverage: number;
+    note?: string;
+  };
   research?: {
     result?: ResearchEvidenceResult;
     appliedCount: number;
@@ -308,6 +316,22 @@ function publicResearchContextFor(idea: IdeaCandidate, project: ProjectDetails) 
   ].join("\n");
 }
 
+function publicContextSummaryFor(result: ResearchEvidenceResult) {
+  return result.evidence.slice(0, 12).map((proposal) => [
+    `${proposal.direction.toUpperCase()} ${proposal.claimIds.join(", ")}: ${proposal.title}`,
+    `Source: ${proposal.sourceTitle} (${proposal.sourceUrl})`,
+    `Exact provider excerpt: ${proposal.sourceExcerpt.slice(0, 1_000)}`,
+    `Limit: ${proposal.uncertainty}`,
+  ].join("\n")).join("\n\n");
+}
+
+function publicContextClaimCoverage(result: ResearchEvidenceResult) {
+  const researchable = new Set<string>(PUBLIC_RESEARCH_CLAIM_IDS);
+  const mapped = new Set(result.evidence.flatMap((proposal) => proposal.claimIds)
+    .filter((claimId) => researchable.has(claimId)));
+  return Math.round(100 * mapped.size / researchable.size);
+}
+
 function researchLiveContextFingerprint(project: ProjectDetails, review: ReviewInput) {
   return secureFingerprint(JSON.stringify([project, review]));
 }
@@ -316,10 +340,10 @@ function oneShotInputFingerprint(
   project: ProjectDetails,
   review: ReviewInput,
   profile: GenerationProfile,
-  idea: IdeaCandidate | undefined,
+  ideas: IdeaCandidate[],
   notes: string,
 ) {
-  return secureFingerprint(JSON.stringify([project, review, profile, idea ?? null, notes]));
+  return secureFingerprint(JSON.stringify([project, review, profile, ideas, notes]));
 }
 
 function undoableStateFingerprint(
@@ -328,41 +352,6 @@ function undoableStateFingerprint(
   review: ReviewInput,
 ) {
   return secureFingerprint(JSON.stringify([project, ideas, review]));
-}
-
-function oneShotReviewBaseline(review: ReviewInput): ReviewInput {
-  const stageIndex = STAGES.indexOf(review.stage);
-  return {
-    ...review,
-    claims: review.claims.map((claim) => {
-      const noteParts = String(claim.note ?? "").split(/\n\n+/);
-      const hadAiInput = noteParts.some((part) => part.startsWith("AI-assisted input ("));
-      return hadAiInput
-        ? {
-            ...claim,
-            merit: null,
-            note: noteParts.filter((part) => !part.startsWith("AI-assisted input (")).join("\n\n"),
-          }
-        : claim;
-    }),
-    gates: review.gates.map((gate) => {
-      const due = stageIndex >= GATE_DUE_STAGE[gate.id];
-      const aiOwned = gate.rationale.startsWith("[AI preview |");
-      if (aiOwned) {
-        return {
-          ...gate,
-          status: due ? "unresolved" : "not_due",
-          rationale: "",
-          owner: "",
-          deadline: "",
-          expectedArtifact: "",
-          passThreshold: "",
-          killThreshold: "",
-        };
-      }
-      return gate.status === "not_due" && due ? { ...gate, status: "unresolved" } : gate;
-    }),
-  };
 }
 
 interface ResearchRunDraftState {
@@ -403,27 +392,6 @@ function mergeEvaluationDrafts(
   };
 }
 
-function evidenceAwareReevaluationBase(
-  humanReview: ReviewInput,
-  evidenceBearingReview: ReviewInput,
-): ReviewInput {
-  const humanClaims = new Map(humanReview.claims.map((claim) => [claim.claimId, claim]));
-  const humanGates = new Map(humanReview.gates.map((gate) => [gate.id, gate]));
-  return {
-    ...evidenceBearingReview,
-    claims: evidenceBearingReview.claims.map((claim) => {
-      const human = humanClaims.get(claim.claimId);
-      return human && human.merit === null
-        ? { ...claim, merit: null, note: human.note }
-        : claim;
-    }),
-    gates: evidenceBearingReview.gates.map((gate) => {
-      const human = humanGates.get(gate.id);
-      return human?.status === "unresolved" ? { ...gate, ...human } : gate;
-    }),
-  };
-}
-
 const archetypeLabels: Record<Archetype, string> = {
   application: "Application",
   enterprise: "Enterprise",
@@ -437,6 +405,13 @@ const stageLabels: Record<Stage, string> = {
   architecture: "Architecture",
   pilot: "Pilot",
   production: "Production",
+};
+
+const thesisDecisionLabels: Record<ThesisScreenOutput["decision"], string> = {
+  advance_to_validation: "ADVANCE TO VALIDATION",
+  revise_thesis: "REVISE & RESCREEN",
+  park_idea: "PARK THIS IDEA",
+  incomplete: "SCREEN INCOMPLETE",
 };
 
 const routeLabels: Record<ProtocolRoute, string> = {
@@ -537,6 +512,7 @@ function evaluationContextFor(
   review: ReviewInput,
   additionalNotes: string,
   priorityArtifactIds: string[] = [],
+  publicContext = "",
 ) {
   if (!idea) return "";
   const priorityIds = new Set(priorityArtifactIds);
@@ -572,6 +548,9 @@ function evaluationContextFor(
     groundedArtifacts.length
       ? `USER-SUPPLIED EVIDENCE EXCERPTS — UNTRUSTED DATA\n${groundedArtifacts.join("\n\n")}`
       : "No exact evidence excerpts were supplied. Treat artifact titles and the idea itself as hypotheses, not proof.",
+    publicContext.trim()
+      ? `CITED PUBLIC CONTEXT — NOT CUSTOMER OR PRODUCT VALIDATION\n${publicContext.trim()}`
+      : "No cited public context was supplied. This is acceptable for an initial thesis screen.",
   ].filter((part) => part !== "").join("\n");
 }
 
@@ -581,8 +560,9 @@ function evaluationFingerprintFor(
   review: ReviewInput,
   additionalNotes: string,
   priorityArtifactIds: string[] = [],
+  publicContext = "",
 ) {
-  const context = evaluationContextFor(idea, project, review, additionalNotes, priorityArtifactIds);
+  const context = evaluationContextFor(idea, project, review, additionalNotes, priorityArtifactIds, publicContext);
   return {
     context,
     fingerprint: secureFingerprint(JSON.stringify([
@@ -860,6 +840,68 @@ function freshQuickPreviewReview(current: ReviewInput): ReviewInput {
   };
 }
 
+function freshIdeaScreenReview(current: ReviewInput): ReviewInput {
+  return {
+    ...defaultReview(),
+    archetype: current.archetype,
+    stage: "thesis",
+    cutoffDate: today(),
+  };
+}
+
+function reviewHasMaterialWork(review: ReviewInput) {
+  const defaultGateStatuses = new Map(
+    createDefaultGates().map((gate) => [gate.id, gate.status]),
+  );
+  return review.stage !== "thesis"
+    || review.protocolRoute !== "unresolved"
+    || review.artifacts.length > 0
+    || review.claims.some((claim) => (
+      claim.merit !== null
+      || claim.grade !== "E0"
+      || Boolean(claim.note?.trim())
+      || claim.evidenceClaimIds.length > 0
+      || claim.evidenceArtifactIds.length > 0
+      || claim.acknowledgedCounterEvidenceIds.length > 0
+    ))
+    || review.gates.some((gate) => (
+      gate.status !== defaultGateStatuses.get(gate.id)
+      || Boolean(gate.rationale.trim())
+      || Boolean(gate.owner.trim())
+      || Boolean(gate.deadline.trim())
+      || Boolean(gate.expectedArtifact.trim())
+      || Boolean(gate.passThreshold.trim())
+      || Boolean(gate.killThreshold.trim())
+    ));
+}
+
+function validationReviewFromThesis(review: ReviewInput): ReviewInput {
+  const nextStage: Stage = "discovery";
+  const stageIndex = STAGES.indexOf(nextStage);
+  return {
+    ...review,
+    stage: nextStage,
+    cutoffDate: today(),
+    gates: review.gates.map((gate) => {
+      const due = stageIndex >= GATE_DUE_STAGE[gate.id];
+      const aiScreenGate = gate.rationale.startsWith("[AI preview |");
+      if (aiScreenGate || (due && gate.status === "not_due")) {
+        return {
+          ...gate,
+          status: due ? "unresolved" : "not_due",
+          rationale: "",
+          owner: "",
+          deadline: "",
+          expectedArtifact: "",
+          passThreshold: "",
+          killThreshold: "",
+        };
+      }
+      return gate;
+    }),
+  };
+}
+
 function defaultState(): AppState {
   return {
     started: false,
@@ -1101,9 +1143,13 @@ export default function Home() {
   const modelConfigRequestRef = useRef(0);
   const clearingLocalDataRef = useRef(false);
   const stateRef = useRef(state);
-  stateRef.current = state;
   const evaluationNotesRef = useRef(evaluationNotes);
-  evaluationNotesRef.current = evaluationNotes;
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+  useEffect(() => {
+    evaluationNotesRef.current = evaluationNotes;
+  }, [evaluationNotes]);
   const [evidenceDraft, setEvidenceDraft] = useState(emptyManualEvidenceDraft);
   const desktopAvailable = typeof window === "undefined" ? null : window.sift?.desktop === true;
   const selectedLlmProvider = LLM_PROVIDERS[llmConfig.provider];
@@ -1295,6 +1341,7 @@ export default function Home() {
   }, [section, state.started]);
 
   const score = useMemo(() => scoreReview(state.review), [state.review]);
+  const liveThesisScreen = useMemo(() => screenThesis(state.review), [state.review]);
   const aiUndoAvailable = aiUndo !== null && (aiUndo.appliedStateFingerprint
     ? aiUndo.appliedStateFingerprint === undoableStateFingerprint(state.project, state.ideas, state.review)
     : aiUndo.appliedInputFingerprint === score.inputFingerprint);
@@ -1626,13 +1673,42 @@ export default function Home() {
   }
 
   function beginReview(idea: IdeaCandidate) {
+    const selectingDifferentIdea = state.project.selectedIdeaId !== idea.id;
+    if (selectingDifferentIdea && reviewHasMaterialWork(state.review) && !window.confirm(
+      "Switch ideas? This will discard the current idea's thesis review, gates, and evidence. The idea itself will remain in your idea list.",
+    )) {
+      return;
+    }
+
     const project = { ...state.project, title: idea.title, selectedIdeaId: idea.id };
+    const review = selectingDifferentIdea ? freshIdeaScreenReview(state.review) : state.review;
     setState((current) => ({
       ...current,
       project,
+      review,
     }));
+    if (selectingDifferentIdea) {
+      aiAssistRequestRef.current += 1;
+      setAiAssistBusy(null);
+      setEvaluationNotes("");
+      setEvaluationDraft(null);
+      setSelectedEvaluationClaims([]);
+      setEvidenceSource(emptyEvidenceSourceDraft());
+      setEvidenceAnalysis(null);
+      setSelectedEvidenceProposals([]);
+      setEvidenceDraft(emptyManualEvidenceDraft());
+      setAiUndo(null);
+      setResearchRunDraft(null);
+      setResearchApproval(false);
+    }
     if (quickRunPhase === "choose-idea") {
-      void draftQuickRunEvaluation(idea, project, ++quickRunRequestRef.current);
+      void draftQuickRunEvaluation(
+        idea,
+        project,
+        ++quickRunRequestRef.current,
+        review,
+        selectingDifferentIdea ? "" : evaluationNotes,
+      );
     } else {
       setSection("review");
     }
@@ -1958,15 +2034,7 @@ export default function Home() {
     if (desktopAvailable !== true || !llmReady) {
       setQuickRunPhase("idle");
       setQuickRunMode(null);
-      setLlmMessage("Connect an OpenRouter model once, then Run Everything from Home.");
-      setLlmMessageTone("neutral");
-      setSection("model");
-      return;
-    }
-    if (llmConfig.provider !== "openrouter") {
-      setQuickRunPhase("idle");
-      setQuickRunMode(null);
-      setLlmMessage("Run Everything uses OpenRouter for AI reasoning and cited web research. Choose OpenRouter and a model, then try again.");
+      setLlmMessage("Connect an AI model once, then generate and screen a new idea from Home.");
       setLlmMessageTone("neutral");
       setSection("model");
       return;
@@ -1976,64 +2044,50 @@ export default function Home() {
     const stateAtStart = options.stateOverride ?? stateRef.current;
     const generationPromptBase = options.promptOverride ?? prompt;
     const evaluationNotesAtStart = evaluationNotesRef.current;
-    const selectedAtStart = stateAtStart.ideas.find(
-      (idea) => idea.id === stateAtStart.project.selectedIdeaId,
-    );
-    const needsGeneration = !selectedAtStart;
     const liveFingerprintAtStart = oneShotInputFingerprint(
       stateAtStart.project,
       stateAtStart.review,
       stateAtStart.profile,
-      selectedAtStart,
+      stateAtStart.ideas,
       evaluationNotesAtStart,
     );
     setQuickRunPhase("generating");
-    setQuickRunMessage(needsGeneration
-      ? "Generating four ideas and choosing the strongest profile match."
-      : "Using your selected idea and preparing its automated thesis screen.");
+    setQuickRunMessage("Generating four fresh business ideas and choosing the strongest profile match.");
     setSection("quick");
 
     try {
       const connection = await saveAiConnectionOrOpenSettings();
       if (!connection || runId !== quickRunRequestRef.current) return;
-      if (connection.saved.provider !== "openrouter") throw new Error("Run Everything currently requires OpenRouter.");
 
-      let generatedCandidates: IdeaCandidate[] = [];
-      if (needsGeneration) {
-        const generationPrompt = generationPromptBase.replace("Generate 8 diverse candidates", "Generate 4 diverse candidates");
-        const generation = await connection.bridge.llm.generateIdeas({
-          prompt: generationPrompt,
-          count: 4,
-          provider: connection.saved.provider,
-          baseUrl: connection.saved.baseUrl,
-          model: connection.saved.model,
-        });
-        if (runId !== quickRunRequestRef.current) return;
-        generatedCandidates = generatedCandidatesFromResult(
-          generation,
-          stateAtStart.profile.mode === "private",
-        );
-        if (generatedCandidates.length === 0) {
-          throw new Error("The model returned no ideas that passed SIFT's local schema.");
-        }
-        setLastGeneration({
-          provider: generation.provider,
-          model: generation.model,
-          count: generatedCandidates.length,
-        });
+      const generationPrompt = generationPromptBase.replace("Generate 8 diverse candidates", "Generate 4 diverse candidates");
+      const generation = await connection.bridge.llm.generateIdeas({
+        prompt: generationPrompt,
+        count: 4,
+        provider: connection.saved.provider,
+        baseUrl: connection.saved.baseUrl,
+        model: connection.saved.model,
+      });
+      if (runId !== quickRunRequestRef.current) return;
+      const generatedCandidates = generatedCandidatesFromResult(
+        generation,
+        stateAtStart.profile.mode === "private",
+      );
+      if (generatedCandidates.length === 0) {
+        throw new Error("The model returned no ideas that passed SIFT's local schema.");
       }
+      setLastGeneration({
+        provider: generation.provider,
+        model: generation.model,
+        count: generatedCandidates.length,
+      });
 
-      const chosenIdea = selectedAtStart ?? [...generatedCandidates].sort(
+      const chosenIdea = [...generatedCandidates].sort(
         (left, right) => calculateGenerationPriority(stateAtStart.profile, right.scores)
           - calculateGenerationPriority(stateAtStart.profile, left.scores),
       )[0];
-      if (!chosenIdea) throw new Error("Run Everything could not find an idea to evaluate.");
-      const selectedBy = selectedAtStart
-        ? "existing-user-choice" as const
-        : "automated-priority" as const;
-      const humanReview = selectedAtStart
-        ? { ...oneShotReviewBaseline(stateAtStart.review), cutoffDate: today() }
-        : { ...freshQuickPreviewReview(stateAtStart.review), cutoffDate: today() };
+      if (!chosenIdea) throw new Error("SIFT could not find a generated idea to screen.");
+      const selectedBy = "automated-priority" as const;
+      const ideaScreenReview = freshIdeaScreenReview(stateAtStart.review);
       const projectSnapshot = {
         ...stateAtStart.project,
         title: chosenIdea.title,
@@ -2047,14 +2101,15 @@ export default function Home() {
       const draftEvaluationFor = async (
         baseReview: ReviewInput,
         message: string,
-        priorityArtifactIds: string[] = [],
+        publicContext = "",
       ) => {
         const snapshot = evaluationFingerprintFor(
           chosenIdea,
           projectSnapshot,
           baseReview,
-          selectedAtStart ? evaluationNotesAtStart : "",
-          priorityArtifactIds,
+          evaluationNotesAtStart,
+          [],
+          publicContext,
         );
         const requestedClaimIds = baseReview.claims
           .filter((claim) => claim.merit === null)
@@ -2067,7 +2122,7 @@ export default function Home() {
           model: connection.saved.model,
           projectContext: snapshot.context,
           claimIds: requestedClaimIds,
-          scope: requestedClaimIds.length ? "claims_and_gates" : "gates_only",
+          scope: "thesis_screen",
         });
         if (runId !== quickRunRequestRef.current) throw new Error("Run cancelled.");
         let preview = buildQuickRunPreview({
@@ -2089,7 +2144,7 @@ export default function Home() {
             model: connection.saved.model,
             projectContext: snapshot.context,
             claimIds: preview.missingClaimIds,
-            scope: "claims_and_gates",
+            scope: "thesis_screen",
           });
           if (runId !== quickRunRequestRef.current) throw new Error("Run cancelled.");
           draft = mergeEvaluationDrafts(draft, supplemental);
@@ -2107,60 +2162,46 @@ export default function Home() {
         return preview;
       };
 
-      const initialPreview = await draftEvaluationFor(
-        humanReview,
-        "Evaluating all 51 claims and the non-compensable gates.",
-      );
-
-      setQuickRunPhase("researching-evidence");
-      setQuickRunMessage("Finding public evidence, validating exact citations, and attaching every grounded finding at E1.");
-      let research: ResearchEvidenceResult | undefined;
-      let noEvidenceReason = "";
-      try {
-        research = await connection.bridge.llm.researchEvidence({
-          provider: connection.saved.provider,
-          baseUrl: connection.saved.baseUrl,
-          model: connection.saved.model,
-          projectContext: publicResearchContextFor(chosenIdea, projectSnapshot),
-          claimIds: publicResearchClaimIds(initialPreview.previewReview),
-          maxSources: 8,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "";
-        if (!/no usable (?:cited public-source excerpts|proposals tied to cited public-source excerpts)/i.test(message)) throw error;
-        noEvidenceReason = "The public search returned no grounded citation excerpts, so SIFT completed with an evidence gap instead of inventing proof.";
+      let contextResult: ResearchEvidenceResult | undefined;
+      let contextNote = "";
+      if (connection.saved.provider === "openrouter") {
+        setQuickRunPhase("researching-evidence");
+        setQuickRunMessage("Researching cited public context. This can inform the thesis, but it is not customer validation.");
+        try {
+          contextResult = await connection.bridge.llm.researchEvidence({
+            provider: connection.saved.provider,
+            baseUrl: connection.saved.baseUrl,
+            model: connection.saved.model,
+            projectContext: publicResearchContextFor(chosenIdea, projectSnapshot),
+            claimIds: publicResearchClaimIds(ideaScreenReview),
+            maxSources: 8,
+          });
+        } catch {
+          contextNote = "Public context research could not complete. The thesis screen continued without treating that as failed validation.";
+        }
+      } else {
+        contextNote = "Public context research was skipped because this run used a local or OpenAI-compatible model. Validation still begins normally with zero direct evidence.";
       }
       if (runId !== quickRunRequestRef.current) return;
-      const evidenceApplied = research
-        ? completeAutomatedResearchRun(initialPreview, research, scoreReview)
-        : null;
-      const evidenceBearingReview = evidenceApplied?.preview.previewReview
-        ?? initialPreview.previewReview;
-      const appliedEvidenceCount = evidenceApplied?.applied.artifacts.length ?? 0;
-
-      const evidenceAwareBase = evidenceAwareReevaluationBase(
-        humanReview,
-        evidenceBearingReview,
-      );
       const finalPreview = await draftEvaluationFor(
-        evidenceAwareBase,
-        "Re-evaluating against the cited evidence and calculating the deterministic decision.",
-        evidenceApplied?.applied.artifacts.map((artifact) => artifact.artifactId) ?? [],
+        ideaScreenReview,
+        contextResult
+          ? "Screening the winning thesis against cited public context. No customer proof is expected yet."
+          : "Screening hypothesis quality and creating the discovery decision. No customer proof is expected yet.",
+        contextResult ? publicContextSummaryFor(contextResult) : "",
       );
       if (runId !== quickRunRequestRef.current) return;
+      const thesisScreen = screenThesis(finalPreview.previewReview);
 
       const stateAtCommit = stateRef.current;
-      const selectedAtCommit = selectedAtStart
-        ? stateAtCommit.ideas.find((idea) => idea.id === chosenIdea.id)
-        : undefined;
       if (liveFingerprintAtStart !== oneShotInputFingerprint(
         stateAtCommit.project,
         stateAtCommit.review,
         stateAtCommit.profile,
-        selectedAtCommit,
+        stateAtCommit.ideas,
         evaluationNotesRef.current,
       )) {
-        throw new Error("The project changed while Run Everything was working. Start it again so nothing stale is applied.");
+        throw new Error("The project changed while SIFT was screening ideas. Start again so nothing stale is applied.");
       }
 
       const finalReview = finalPreview.previewReview;
@@ -2171,9 +2212,7 @@ export default function Home() {
         ideas: [...stateAtCommit.ideas, ...ideasToAdd],
         project: {
           ...stateAtCommit.project,
-          title: stateAtCommit.project.title === "Untitled idea review" || !stateAtCommit.project.title.trim()
-            ? chosenIdea.title
-            : stateAtCommit.project.title,
+          title: chosenIdea.title,
           selectedIdeaId: chosenIdea.id,
         },
         review: finalReview,
@@ -2181,12 +2220,12 @@ export default function Home() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
       } catch {
-        throw new Error("Run Everything finished, but the project could not be saved locally. Free browser storage and retry; no live project changes were applied.");
+        throw new Error("The thesis screen finished, but the project could not be saved locally. Free browser storage and retry; no live project changes were applied.");
       }
       stateRef.current = nextState;
       setState(nextState);
       setAiUndo({
-        label: "complete AI one-shot run",
+        label: "new-idea thesis screen",
         review: stateAtCommit.review,
         project: stateAtCommit.project,
         ideas: stateAtCommit.ideas,
@@ -2197,27 +2236,28 @@ export default function Home() {
         kind: "one-shot",
         preview: finalPreview,
         idea: chosenIdea,
-        research: {
-          ...(research ? { result: research } : {}),
-          appliedCount: appliedEvidenceCount,
-          committed: true,
-          ...(noEvidenceReason ? { noEvidenceReason } : {}),
+        thesisScreen,
+        contextResearch: {
+          ...(contextResult ? { result: contextResult } : {}),
+          sourceCount: contextResult?.citations.length ?? 0,
+          claimCoverage: contextResult ? publicContextClaimCoverage(contextResult) : 0,
+          ...(contextNote ? { note: contextNote } : {}),
         },
       });
       setQuickRunPhase("idle");
       setQuickRunMode(null);
       setQuickRunMessage("");
       setSection("results");
-      setToast(finalPreview.status === "preview_ready"
-        ? "Run complete: READY provisional thesis screen saved"
-        : finalPreview.status === "preview_not_ready"
-          ? "Run complete: NOT READY provisional thesis screen saved"
-          : appliedEvidenceCount > 0
-            ? "Run complete: HOLD — incomplete screen saved with cited evidence"
-            : "Run complete: HOLD — evidence gap saved; no proof was invented");
+      setToast(thesisScreen.decision === "advance_to_validation"
+        ? "Idea screen complete: advance to validation"
+        : thesisScreen.decision === "revise_thesis"
+          ? "Idea screen complete: revise and rescreen"
+          : thesisScreen.decision === "park_idea"
+            ? "Idea screen complete: park this idea"
+            : "Idea screen saved with unanswered thesis inputs");
     } catch (error) {
       if (runId !== quickRunRequestRef.current) return;
-      const message = error instanceof Error ? error.message : "Run Everything could not complete.";
+      const message = error instanceof Error ? error.message : "Generate & Screen could not complete.";
       setQuickRunPhase("idle");
       setQuickRunMode("one-shot");
       setQuickRunOutcome(null);
@@ -2546,12 +2586,14 @@ export default function Home() {
     idea: IdeaCandidate,
     projectSnapshot: ProjectDetails,
     existingRunId?: number,
+    reviewSnapshot: ReviewInput = state.review,
+    notesSnapshot: string = evaluationNotes,
   ) {
     const runId = existingRunId ?? ++quickRunRequestRef.current;
-    const claimIds = state.review.claims.filter((claim) => claim.merit === null).map((claim) => claim.claimId);
+    const claimIds = reviewSnapshot.claims.filter((claim) => claim.merit === null).map((claim) => claim.claimId);
     if (claimIds.length === 0) {
       setQuickRunPhase("evidence");
-      setQuickRunMessage(state.review.artifacts.length
+      setQuickRunMessage(reviewSnapshot.artifacts.length
         ? "Add another real source if needed, or continue with the evidence already attached."
         : "Add real source material, or continue with an evidence-free provisional baseline.");
       setSection("evidence");
@@ -2575,7 +2617,7 @@ export default function Home() {
         setSection("ideas");
         return;
       }
-      const snapshot = evaluationFingerprintFor(idea, projectSnapshot, state.review, evaluationNotes);
+      const snapshot = evaluationFingerprintFor(idea, projectSnapshot, reviewSnapshot, notesSnapshot);
       const result = await connection.bridge.llm.draftEvaluation({
         provider: connection.saved.provider,
         baseUrl: connection.saved.baseUrl,
@@ -2589,7 +2631,7 @@ export default function Home() {
         result,
         contextFingerprint: snapshot.fingerprint,
         gateFingerprints: Object.fromEntries(
-          state.review.gates.map((gate) => [gate.id, gateStateFingerprint(gate)]),
+          reviewSnapshot.gates.map((gate) => [gate.id, gateStateFingerprint(gate)]),
         ) as Record<GateAssessment["id"], string>,
         createdAt: new Date().toISOString(),
       });
@@ -2689,8 +2731,31 @@ export default function Home() {
     if (section === "quick") setSection("overview");
   }
 
+  function beginValidation() {
+    const current = stateRef.current;
+    if (!current.ideas.some((idea) => idea.id === current.project.selectedIdeaId)) {
+      setToast("Choose an idea before starting validation");
+      setSection("ideas");
+      return;
+    }
+    const nextState = current.review.stage === "thesis"
+      ? { ...current, review: validationReviewFromThesis(current.review) }
+      : current;
+    if (nextState !== current) {
+      stateRef.current = nextState;
+      setState(nextState);
+    }
+    setQuickRunOutcome(null);
+    setSection("evidence");
+    setToast("Validation started with zero direct evidence — exactly as expected");
+  }
+
   function inspectQuickRunOutcome() {
     if (!quickRunOutcome) return;
+    if (quickRunOutcome.kind === "one-shot") {
+      beginValidation();
+      return;
+    }
     if (quickRunOutcome.research?.committed) {
       setSection("evidence");
       setToast("Opened the live evidence ledger; researched records remain capped at E1");
@@ -2750,6 +2815,7 @@ export default function Home() {
         model: connection.saved.model,
         projectContext: evaluationContext,
         claimIds,
+        scope: state.review.stage === "thesis" ? "thesis_screen" : "claims_and_gates",
       });
       if (requestId !== aiAssistRequestRef.current) return;
       setEvaluationDraft({
@@ -3126,9 +3192,9 @@ export default function Home() {
         <section className="hero">
           <div className="hero-copy">
             <h1>Find what holds.</h1>
-            <p className="hero-lede">One action generates the idea, evaluates it, finds cited evidence, and calculates what survives.</p>
+            <p className="hero-lede">One action generates fresh business ideas, screens the strongest thesis, and tells you whether it is worth validating.</p>
             <div className="hero-actions">
-              <button className="button primary" onClick={startQuickFromWelcome}>Run Everything <span aria-hidden="true">→</span></button>
+              <button className="button primary" onClick={startQuickFromWelcome}>Generate & screen <span aria-hidden="true">→</span></button>
               <button className="button secondary" onClick={() => start("neutral")}>Start manually</button>
             </div>
             <div className="hero-secondary-actions">
@@ -3136,7 +3202,7 @@ export default function Home() {
               <span aria-hidden="true">·</span>
               <button className="text-button" onClick={startWithIdea}>I already have an idea</button>
             </div>
-            <p className="trust-line">No SIFT account · Deterministic scoring · OpenRouter only when you run AI</p>
+            <p className="trust-line">No SIFT account · Deterministic thesis screening · Validation starts honestly at zero</p>
           </div>
           <aside className="hero-art" aria-label="SIFT tornado artwork">
             <img className="hero-mark" src={SIFT_HERO_URL} alt="" aria-hidden="true" />
@@ -3149,9 +3215,9 @@ export default function Home() {
   const primaryNavigation: Array<{ id: Section; label: string; meta?: string }> = [
     { id: "overview", label: "Home" },
     { id: "ideas", label: "Ideas" },
-    { id: "review", label: "Evaluate" },
-    { id: "evidence", label: "Evidence" },
-    { id: "results", label: "Decision" },
+    { id: "review", label: "Thesis screen" },
+    { id: "evidence", label: "Validation evidence" },
+    { id: "results", label: "Stage decision" },
     { id: "build", label: "Build" },
   ];
   const utilityNavigation: Array<{ id: Section; label: string; meta?: string }> = [
@@ -3230,7 +3296,7 @@ export default function Home() {
             score={score}
             selectedIdea={selectedIdea}
             desktopAvailable={desktopAvailable === true}
-            oneShotReady={desktopAvailable === true && llmReady && llmConfig.provider === "openrouter"}
+            oneShotReady={desktopAvailable === true && llmReady}
             quickRunBusy={quickRunBusy}
             onOneShotRun={() => void startOneShotRun()}
             onQuickRun={() => void startQuickRun()}
@@ -3252,10 +3318,10 @@ export default function Home() {
         ) : section === "quick" && (
           <div className="page-section narrow quick-run-page">
             <PageHeading
-              eyebrow={quickRunMode === "one-shot" ? "Run Everything" : quickRunMode === "research" ? "Research & Run" : quickRunMode === "auto-preview" ? "AI one-click preview" : "Guided Quick Run"}
-              title={quickRunMode === "one-shot" ? "One click. Complete workflow." : quickRunMode === "research" ? "One start. One source review. One provisional outcome." : quickRunMode === "auto-preview" ? "One click selects. AI proposes. The formula calculates." : "AI drafts the work. You approve what counts."}
+              eyebrow={quickRunMode === "one-shot" ? "Generate & Screen" : quickRunMode === "research" ? "Research & Run" : quickRunMode === "auto-preview" ? "AI one-click preview" : "Guided Quick Run"}
+              title={quickRunMode === "one-shot" ? "One click to a thesis worth testing." : quickRunMode === "research" ? "One start. One source review. One provisional outcome." : quickRunMode === "auto-preview" ? "One click selects. AI proposes. The formula calculates." : "AI drafts the work. You approve what counts."}
               description={quickRunMode === "one-shot"
-                ? "SIFT is generating or selecting the idea, evaluating the complete rubric, attaching grounded public research, re-evaluating, and calculating the outcome without stage pauses."
+                ? "SIFT generates fresh ideas, selects the strongest exploration match, researches optional public context, and screens whether the thesis deserves real-world validation."
                 : quickRunMode === "research"
                 ? "SIFT is building an isolated review, searching attributable public sources, and validating exact citation excerpts before anything can enter your evidence ledger."
                 : quickRunMode === "auto-preview"
@@ -3264,11 +3330,11 @@ export default function Home() {
             />
             <section className="quick-run-working" aria-live="polite">
               <img src={SIFT_MARK_URL} alt="" aria-hidden="true" />
-              <div><span>{quickRunBusy ? "Working" : quickRunMode === "one-shot" && quickRunMessage.startsWith("Run stopped:") ? "Stopped" : "Ready"}</span><h2>{quickRunMessage || "Preparing the next checkpoint."}</h2><p>{quickRunMode === "one-shot" ? "Generate idea → Evaluate → Evidence → Decision" : quickRunMode === "research" ? "Idea → Evaluation → Public research → Cited preview" : "Idea → Evaluation → Evidence → Gates → Decision"}</p></div>
+              <div><span>{quickRunBusy ? "Working" : quickRunMode === "one-shot" && quickRunMessage.startsWith("Run stopped:") ? "Stopped" : "Ready"}</span><h2>{quickRunMessage || "Preparing the next checkpoint."}</h2><p>{quickRunMode === "one-shot" ? "Fresh ideas → Public context → Thesis screen → Discovery decision" : quickRunMode === "research" ? "Idea → Evaluation → Public research → Cited preview" : "Idea → Evaluation → Evidence → Gates → Decision"}</p></div>
               {quickRunBusy && <i aria-hidden="true" />}
             </section>
-            <div className="quick-run-boundary"><strong>{quickRunMode === "one-shot" ? "AI automates the workflow—not truth." : quickRunMode === "research" ? "Public research is not customer validation." : quickRunMode === "auto-preview" ? "A preview is not an official review." : "Quick does not mean automatic approval."}</strong><span>{quickRunMode === "one-shot" ? "Every web finding must match an exact provider citation, stays unverified DeskResearch/E1, and can only produce a provisional thesis decision. Missing or contradictory evidence returns an honest HOLD or incomplete outcome." : quickRunMode === "research" ? "Only provider-cited exact excerpts can proceed, every record stays DeskResearch/E1, and one consolidated approval is required before your project changes." : quickRunMode === "auto-preview" ? "AI inputs exist only in a shadow copy. No evidence is created or verified, and the live deterministic record is untouched." : "No idea, merit rating, evidence record, gate, or final decision is accepted without your action."}</span></div>
-            <div className="quick-run-recovery-actions">{quickRunMode === "one-shot" && quickRunPhase === "idle" && <button className="button primary" onClick={() => void startOneShotRun()}>Retry Run Everything</button>}<button className="button secondary" onClick={exitQuickRun}>{quickRunMode === "one-shot" ? "Return Home" : "Exit Quick Run"}</button></div>
+            <div className="quick-run-boundary"><strong>{quickRunMode === "one-shot" ? "No customer evidence is expected yet." : quickRunMode === "research" ? "Public research is not customer validation." : quickRunMode === "auto-preview" ? "A preview is not an official review." : "Quick does not mean automatic approval."}</strong><span>{quickRunMode === "one-shot" ? "The score measures the specificity, coherence, and falsifiability of a hypothesis. Public citations provide context only. Interviews, tests, commitments, payments, production use, and audits begin after the idea exists." : quickRunMode === "research" ? "Only provider-cited exact excerpts can proceed, every record stays DeskResearch/E1, and one consolidated approval is required before your project changes." : quickRunMode === "auto-preview" ? "AI inputs exist only in a shadow copy. No evidence is created or verified, and the live deterministic record is untouched." : "No idea, merit rating, evidence record, gate, or final decision is accepted without your action."}</span></div>
+            <div className="quick-run-recovery-actions">{quickRunMode === "one-shot" && quickRunPhase === "idle" && <button className="button primary" onClick={() => void startOneShotRun()}>Retry Generate & Screen</button>}<button className="button secondary" onClick={exitQuickRun}>{quickRunMode === "one-shot" ? "Return Home" : "Exit Quick Run"}</button></div>
           </div>
         )}
 
@@ -3371,7 +3437,7 @@ export default function Home() {
               <>
                 <div className="model-safety-strip">
                   <img src={SIFT_MARK_URL} alt="" aria-hidden="true" />
-                  <div><strong>Manual mode keeps every checkpoint.</strong><span>Use these controls to review AI drafts individually, or choose Run Everything on Home for the automated workflow.</span></div>
+                  <div><strong>Manual mode keeps every checkpoint.</strong><span>Use these controls to review AI drafts individually, or choose Generate & screen on Home for the automated idea workflow.</span></div>
                 </div>
 
                 <section className="form-card model-config-card">
@@ -3601,14 +3667,14 @@ export default function Home() {
 
         {section === "review" && (
           <div className="page-section">
-            <PageHeading eyebrow="Evaluate" title="Test what must be true." description="Unanswered claims stay unassessed." />
+            <PageHeading eyebrow={state.review.stage === "thesis" ? "Job 1 · Thesis screen" : "Evaluate"} title={state.review.stage === "thesis" ? "Score the hypothesis—not imaginary proof." : "Test what must be true."} description={state.review.stage === "thesis" ? "Merit measures specificity, coherence, and falsifiability. Evidence is deliberately not part of this score." : "Unanswered claims stay unassessed."} />
             <section className="ai-assist-card" aria-labelledby="evaluation-ai-title">
               <div className="ai-assist-head">
                 <div className="ai-assist-symbol" aria-hidden="true">AI</div>
                 <div>
                   <p className="eyebrow">Optional assistant</p>
                   <h2 id="evaluation-ai-title">Draft an evaluation with AI</h2>
-                  <p>AI can recommend merit ratings and explain uncertainty. Nothing changes until you select and apply a draft. Evidence grades and the deterministic calculator stay under local rules.</p>
+                  <p>{state.review.stage === "thesis" ? "AI can assess how clearly each success condition and test is defined. It must not pretend customers, payments, production results, or audits already exist." : "AI can recommend merit ratings and explain uncertainty. Nothing changes until you select and apply a draft. Evidence grades and the deterministic calculator stay under local rules."}</p>
                 </div>
                 <span className="provisional-pill">Draft only</span>
               </div>
@@ -3621,7 +3687,7 @@ export default function Home() {
                 <div className="ai-assist-empty"><span>Model required</span><p>Connect Ollama, LM Studio, OpenRouter, or another compatible model first.</p><button className="button secondary" onClick={() => setSection("model")}>Connect a model</button></div>
               ) : (
                 <div className="ai-assist-controls">
-                  <div className="ai-model-line"><span className={llmUsesRemoteEndpoint ? "cloud" : "local"}>{llmUsesRemoteEndpoint ? "Cloud" : "Local"}</span><strong>{llmConfig.model}</strong><small>{llmUsesRemoteEndpoint ? "The selected idea, these notes, and exact evidence excerpts are sent to the provider when you click Draft." : "The selected context stays on this computer when the endpoint is local."}</small></div>
+                  <div className="ai-model-line"><span className={llmUsesRemoteEndpoint ? "cloud" : "local"}>{llmUsesRemoteEndpoint ? "Cloud" : "Local"}</span><strong>{llmConfig.model}</strong><small>{llmUsesRemoteEndpoint ? state.review.stage === "thesis" ? "The selected idea and these optional notes are sent to the provider. Validation evidence is not part of a thesis screen." : "The selected idea, these notes, and exact evidence excerpts are sent to the provider when you click Draft." : "The selected context stays on this computer when the endpoint is local."}</small></div>
                   <label className="ai-notes-field"><span>Additional facts or notes <small>optional · up to 8,000 characters</small></span><textarea rows={3} maxLength={8_000} value={evaluationNotes} placeholder="Paste facts the model may use. Do not paste private profile data unless you intend to send it." onChange={(event) => setEvaluationNotes(event.target.value)} /></label>
                   <div className="ai-action-row"><span>{state.review.claims.filter((claim) => claim.merit === null).length} unanswered claims will be requested. Existing answers will not be overwritten.</span><button className="button primary" disabled={aiAssistBusy !== null} onClick={() => void draftEvaluationWithAi()}>{aiAssistBusy === "evaluation" ? "Drafting…" : llmUsesRemoteEndpoint ? "Send & draft unanswered" : "Draft unanswered claims"}</button></div>
                 </div>
@@ -3635,7 +3701,7 @@ export default function Home() {
                     <div><strong>Provisional draft</strong><span>{evaluationDraft.result.provider} · {evaluationDraft.result.model} · {new Date(evaluationDraft.createdAt).toLocaleString()}</span></div>
                     <span>{evaluationDraft.result.claims.length > 0
                       ? `${evaluationDraft.result.claims.filter((proposal) => proposal.suggestedMerit !== null).length} rated · ${evaluationDraft.result.claims.filter((proposal) => proposal.suggestedMerit === null).length} left unknown`
-                      : `${evaluationDraft.result.gates.length} gate drafts refreshed`}</span>
+                      : `${evaluationDraft.result.gates.filter((proposal) => state.review.stage !== "thesis" || proposal.gateId === "G1" || proposal.gateId === "G2" || proposal.gateId === "G7").length} gate drafts refreshed`}</span>
                   </div>
                   {evaluationDraft.contextFingerprint !== evaluationContextFingerprint && <div className="ai-stale-warning" role="status"><strong>Draft out of date.</strong><span>The idea, review setup, notes, or supplied excerpts changed. Generate a fresh draft before applying anything.</span></div>}
                   {evaluationDraft.result.claims.length > 0 && <details className="ai-review-queue" open>
@@ -3662,7 +3728,7 @@ export default function Home() {
                     <summary>Review gate recommendations one at a time</summary>
                     <p className="ai-queue-note">Gate decisions are non-compensable. There is no bulk apply; each recommendation needs a separate human action.</p>
                     <div className="ai-gate-list">
-                      {evaluationDraft.result.gates.map((proposal) => {
+                      {evaluationDraft.result.gates.filter((proposal) => state.review.stage !== "thesis" || proposal.gateId === "G1" || proposal.gateId === "G2" || proposal.gateId === "G7").map((proposal) => {
                         const currentGate = state.review.gates.find((gate) => gate.id === proposal.gateId);
                         const gateChanged = !currentGate || evaluationDraft.gateFingerprints[proposal.gateId] !== gateStateFingerprint(currentGate);
                         return (
@@ -3679,21 +3745,21 @@ export default function Home() {
                 </div>
               )}
             </section>
-            <fieldset className="review-config">
+            <fieldset className={`review-config ${state.review.stage === "thesis" ? "thesis-review-config" : ""}`}>
               <legend className="sr-only">Review configuration</legend>
               <label><span>Dominant archetype</span><select value={state.review.archetype} onChange={(event) => updateReview({ archetype: event.target.value as Archetype })}>{ARCHETYPES.map((item) => <option key={item} value={item}>{archetypeLabels[item]}</option>)}</select></label>
-              <label><span>Target stage</span><select value={state.review.stage} onChange={(event) => updateReview({ stage: event.target.value as Stage })}>{STAGES.map((item) => <option key={item} value={item}>{stageLabels[item]}</option>)}</select></label>
+              <label><span>Review phase</span>{state.review.stage === "thesis" ? <input value="Thesis screen" readOnly /> : <select value={state.review.stage} onChange={(event) => updateReview({ stage: event.target.value as Stage })}>{STAGES.filter((item) => item !== "thesis").map((item) => <option key={item} value={item}>{stageLabels[item]}</option>)}</select>}</label>
               <label><span>Protocol route</span><select value={state.review.protocolRoute} onChange={(event) => updateReview({ protocolRoute: event.target.value as ProtocolRoute })}>{Object.entries(routeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-              <label><span>Evidence cutoff</span><input type="date" value={state.review.cutoffDate} onChange={(event) => updateReview({ cutoffDate: event.target.value })} /></label>
+              {state.review.stage !== "thesis" && <label><span>Evidence cutoff</span><input type="date" value={state.review.cutoffDate} onChange={(event) => updateReview({ cutoffDate: event.target.value })} /></label>}
             </fieldset>
-            <div className="progress-line"><div><span style={{ width: `${(score.assessedClaims / score.totalClaims) * 100}%` }} /></div><strong>{score.assessedClaims} of {score.totalClaims} assessed</strong><button className="text-button" onClick={() => setSection("evidence")}>Attach evidence →</button></div>
+            <div className="progress-line"><div><span style={{ width: `${(score.assessedClaims / score.totalClaims) * 100}%` }} /></div><strong>{score.assessedClaims} of {score.totalClaims} assessed</strong><button className="text-button" onClick={state.review.stage === "thesis" ? beginValidation : () => setSection("evidence")}>{state.review.stage === "thesis" ? "Start validation →" : "Attach evidence →"}</button></div>
 
             <section className="gate-section">
-              <div className="section-title"><div><p className="eyebrow">Non-compensable controls</p><h2>Stage gates</h2></div><span>{score.gateBlockers.length} blockers</span></div>
+              <div className="section-title"><div><p className="eyebrow">Non-compensable controls</p><h2>{state.review.stage === "thesis" ? "Thesis screen gates" : "Stage gates"}</h2></div><span>{state.review.stage === "thesis" ? (["G1", "G2", "G7"] as const).filter((id) => liveThesisScreen.gateStatuses[id] !== "pass").length : score.gateBlockers.length} blockers</span></div>
               <div className="gate-grid">
-                {state.review.gates.map((gate) => (
+                {state.review.gates.filter((gate) => state.review.stage !== "thesis" || gate.id === "G1" || gate.id === "G2" || gate.id === "G7").map((gate) => (
                   <article className={`gate-card status-${gate.status}`} key={gate.id}>
-                    <div className="gate-top"><code>{gate.id}</code><select value={gate.status} onChange={(event) => updateGate(gate.id, { status: event.target.value as GateAssessment["status"] })}><option value="pass">Pass</option><option value="conditional">Conditional</option><option value="fail">Fail</option><option value="unresolved">Unresolved</option><option value="not_due">Not due</option></select></div>
+                    <div className="gate-top"><code>{gate.id}</code><select value={gate.status} onChange={(event) => updateGate(gate.id, { status: event.target.value as GateAssessment["status"] })}><option value="pass">Pass</option>{state.review.stage !== "thesis" && <option value="conditional">Conditional</option>}<option value="fail">Fail</option><option value="unresolved">Unresolved</option>{state.review.stage !== "thesis" && <option value="not_due">Not due</option>}</select></div>
                     <h3>{gateLabels[gate.id]}</h3>
                     <textarea rows={2} value={gate.rationale} placeholder="Decision rationale" onChange={(event) => updateGate(gate.id, { rationale: event.target.value })} />
                     {gate.status === "conditional" && <div className="conditional-fields"><input placeholder="Owner" value={gate.owner} onChange={(event) => updateGate(gate.id, { owner: event.target.value })} /><input type="date" value={gate.deadline} onChange={(event) => updateGate(gate.id, { deadline: event.target.value })} /><input placeholder="Expected artifact" value={gate.expectedArtifact} onChange={(event) => updateGate(gate.id, { expectedArtifact: event.target.value })} /><input placeholder="Pass threshold" value={gate.passThreshold} onChange={(event) => updateGate(gate.id, { passThreshold: event.target.value })} /><input placeholder="Kill threshold" value={gate.killThreshold} onChange={(event) => updateGate(gate.id, { killThreshold: event.target.value })} /></div>}
@@ -3703,7 +3769,7 @@ export default function Home() {
             </section>
 
             <section className="claims-section">
-              <div className="section-title"><div><p className="eyebrow">Canonical rubric</p><h2>12 category rounds</h2></div><span>Weights locked to {archetypeLabels[state.review.archetype]}</span></div>
+              <div className="section-title"><div><p className="eyebrow">Canonical rubric</p><h2>{state.review.stage === "thesis" ? "Hypothesis quality" : "12 category rounds"}</h2></div><span>Weights locked to {archetypeLabels[state.review.archetype]}</span></div>
               <div className="category-list">
                 {categories.map(([categoryId, category]) => {
                   const summary = score.categorySummaries.find((item) => item.id === categoryId)!;
@@ -3713,7 +3779,7 @@ export default function Home() {
                       <summary>
                         <span className="category-number">{categoryId.padStart(2, "0")}</span>
                         <span className="category-name"><strong>{category}</strong><small>{summary.assessedClaims}/{summary.totalClaims} assessed · {summary.weight}% locked weight</small></span>
-                        <span className="category-metrics"><b>{summary.rawPoints}</b><i>raw</i><b>{summary.validatedPoints}</b><i>validated</i></span>
+                        <span className="category-metrics"><b>{summary.rawPoints}</b><i>{state.review.stage === "thesis" ? "thesis" : "raw"}</i>{state.review.stage !== "thesis" && <><b>{summary.validatedPoints}</b><i>validated</i></>}</span>
                       </summary>
                       <div className="claim-table">
                         {rows.map((row) => {
@@ -3721,11 +3787,11 @@ export default function Home() {
                           const result = score.claimResults.find((item) => item.claimId === row.claimId)!;
                           const evidenceCount = state.review.artifacts.filter((item) => item.rubricClaimIds.includes(row.claimId)).length;
                           return (
-                            <div className="claim-row" key={row.claimId} id={`claim-${row.claimId}`}>
-                              <div className="claim-copy"><code>{row.claimId}</code><div><strong>{row.atomicClaim}</strong><small>Locked weight {row.weights[state.review.archetype].toFixed(2)} · {evidenceCount} artifact{evidenceCount === 1 ? "" : "s"}</small></div></div>
+                            <div className={`claim-row ${state.review.stage === "thesis" ? "thesis-claim-row" : ""}`} key={row.claimId} id={`claim-${row.claimId}`}>
+                              <div className="claim-copy"><code>{row.claimId}</code><div><strong>{row.atomicClaim}</strong><small>Locked weight {row.weights[state.review.archetype].toFixed(2)}{state.review.stage !== "thesis" ? ` · ${evidenceCount} artifact${evidenceCount === 1 ? "" : "s"}` : " · hypothesis only"}</small></div></div>
                               <label className="compact-field"><span>Merit 0–5</span><input type="number" min="0" max="5" step="0.5" placeholder="—" value={claim.merit ?? ""} onChange={(event) => updateClaim(row.claimId, { merit: event.target.value === "" ? null : Number(event.target.value) })} /></label>
-                              <label className="compact-field"><span>Evidence</span><select value={claim.grade} onChange={(event) => updateClaim(row.claimId, { grade: event.target.value as EvidenceGrade })}>{EVIDENCE_GRADES.map((grade) => <option key={grade}>{grade}</option>)}</select></label>
-                              <div className="claim-contribution"><span>{result.rawPoints.toFixed(2)}</span><small>raw</small><span>{result.validatedPoints.toFixed(2)}</span><small>validated</small></div>
+                              {state.review.stage !== "thesis" && <label className="compact-field"><span>Evidence</span><select value={claim.grade} onChange={(event) => updateClaim(row.claimId, { grade: event.target.value as EvidenceGrade })}>{EVIDENCE_GRADES.map((grade) => <option key={grade}>{grade}</option>)}</select></label>}
+                              <div className="claim-contribution"><span>{result.rawPoints.toFixed(2)}</span><small>{state.review.stage === "thesis" ? "thesis" : "raw"}</small>{state.review.stage !== "thesis" && <><span>{result.validatedPoints.toFixed(2)}</span><small>validated</small></>}</div>
                             </div>
                           );
                         })}
@@ -3740,10 +3806,12 @@ export default function Home() {
 
         {section === "evidence" && (
           <div className="page-section">
-            <PageHeading eyebrow="Evidence" title="Add evidence." description="Every record stays linked, dated, and reviewable." />
+            <PageHeading eyebrow="Validation" title="Build real evidence." description="A new idea starts here with zero direct proof. That is expected, not a failure." />
+            {state.review.stage === "thesis" && <section className="validation-start-card"><div><p className="eyebrow">Separate job · Validation</p><h2>The thesis exists. Now test it in the real world.</h2><p>Starting validation resets AI screen gates, keeps the hypothesis, and opens Discovery with an intentionally empty direct-evidence baseline. Evidence tools stay locked until this handoff so public context and real validation cannot be confused.</p></div><button className="button primary" disabled={!selectedIdea} onClick={beginValidation}>{selectedIdea ? "Start validation" : "Choose an idea first"}</button></section>}
+            {state.review.stage !== "thesis" && <>
             <section className="evidence-research-launch">
-              <div><p className="eyebrow">Automated public research</p><h2>Let AI find and attach cited evidence</h2><p>Run Everything accepts only exact provider-returned excerpts, caps every public finding at DeskResearch/E1, re-evaluates the idea, and calculates the outcome automatically.</p></div>
-              <div><button className="button primary" disabled={quickRunBusy} onClick={() => void startOneShotRun()}>{quickRunBusy ? "Running everything…" : "Run Everything"}</button><button className="text-button" disabled={quickRunBusy} onClick={() => void startResearchRun()}>Review sources manually</button><small>Requires OpenRouter · model and web-search charges apply</small></div>
+              <div><p className="eyebrow">Public context · E1 ceiling</p><h2>Research the environment—not imaginary customers</h2><p>AI can find cited market, competitor, regulatory, and protocol context. It cannot create interviews, buying behavior, tests, payments, production use, or an audit for this idea.</p></div>
+              <div><button className="button primary" disabled={quickRunBusy} onClick={() => void startResearchRun()}>{quickRunBusy ? "Researching…" : "Find cited public context"}</button><small>Requires OpenRouter · every source is reviewed before attachment</small></div>
             </section>
             <section className="ai-assist-card evidence-ai-card" aria-labelledby="evidence-ai-title">
               <div className="ai-assist-head">
@@ -3836,7 +3904,7 @@ export default function Home() {
             </div>
             <section className="ledger-section">
               <div className="section-title"><div><p className="eyebrow">Current ledger</p><h2>{state.review.artifacts.length} records</h2></div><span>Cutoff {state.review.cutoffDate}</span></div>
-              {state.review.artifacts.length === 0 ? <EmptyState number="E0" title="No evidence attached" text="Claims may still receive a merit score, but unsupported grades must remain E0." /> : (
+              {state.review.artifacts.length === 0 ? <EmptyState number="E0" title="Discovery starts at zero" text="The validation ledger is intentionally empty. Begin with problem interviews or a falsification test; commitments, payments, production behavior, and audits become due only as the project advances." /> : (
                 <div className="ledger-table">
                   {state.review.artifacts.map((artifact) => (
                     <article key={artifact.artifactId} className={`ledger-row direction-${artifact.direction}`}>
@@ -3852,6 +3920,7 @@ export default function Home() {
                 </div>
               )}
             </section>
+            </>}
           </div>
         )}
 
@@ -3859,35 +3928,52 @@ export default function Home() {
           <div className="page-section results-page">
             {quickRunOutcome && <QuickRunPreviewPanel outcome={quickRunOutcome} onInspect={inspectQuickRunOutcome} onDismiss={() => setQuickRunOutcome(null)} />}
             {quickRunOutcome?.kind === "one-shot" && aiUndoAvailable && aiUndo && <div className="ai-undo-bar one-shot-undo" role="status"><span>Want to go back? Restore the project exactly as it was before this run.</span><button className="button small secondary" onClick={undoLastAiApproval}>Undo complete run</button></div>}
-            <div className={`result-hero ${score.official && score.numericEligible && score.gateEligible ? "eligible" : "blocked"}`}>
-              <div><p className="eyebrow">{quickRunOutcome?.kind === "one-shot" ? "AI-automated inputs · deterministic calculator" : quickRunOutcome ? "Live deterministic review · separate from AI preview" : "Stage decision instrument"}</p><h1>{!score.official ? quickRunOutcome?.kind === "one-shot" ? "Automated screen incomplete" : "Validation incomplete" : score.numericEligible && score.gateEligible ? `Ready for ${stageLabels[state.review.stage]} human decision` : `Blocked at ${stageLabels[state.review.stage]}`}</h1><p>{!score.official ? `${score.validationErrors.length} input checks must be resolved before these totals become official.` : `${score.numericBlockers.length} numeric and ${score.gateBlockers.length} gate blockers remain.`}</p></div>
-              <div className="result-verdict"><span>Numeric + gate status</span><strong>{score.numericEligible && score.gateEligible ? "READY" : "NOT READY"}</strong><small>Not a final investment or launch decision</small></div>
-            </div>
-            <div className="metric-grid">
-              <Metric label="Raw Thesis Score" value={score.rawThesisScore} note="Merit before evidence discount" />
-              <Metric label="Validated Score" value={score.validatedScore} note="Merit × evidence strength" />
-              <Metric label="Confidence Index" value={score.evidenceConfidenceIndex} note="How strong the evidence base is" />
-              <Metric label="Verified Coverage" value={score.verifiedEvidenceCoverage} note="Rubric weight at E2 or higher" suffix="%" />
-            </div>
-            <div className="integrity-strip"><span>Policy-adjusted score <strong>{score.policyAdjustedValidatedScore}</strong></span><span>Active cap <strong>{score.policyCap}</strong></span><span>Assessed <strong>{score.assessedClaims}/{score.totalClaims}</strong></span><span>Input fingerprint <code>{score.inputFingerprint}</code></span></div>
-            <section className="build-handoff-strip"><div><p className="eyebrow">Next workspace</p><strong>Carry this decision into a guarded Xahau / Evernode build flow.</strong><span>Your score, evidence state, selected route, and critical assumption become the build brief.</span></div><button className="button primary" disabled={!selectedIdea} onClick={() => setSection("build")}>{selectedIdea ? "Open Build" : "Choose an idea first"}</button></section>
-            {(score.validationErrors.length > 0 || score.numericBlockers.length > 0 || score.gateBlockers.length > 0) && (
-              <div className="issue-columns">
+            {state.review.stage === "thesis" ? <>
+              <div className={`result-hero ${liveThesisScreen.decision === "advance_to_validation" ? "eligible" : "blocked"}`}>
+                <div><p className="eyebrow">Job 1 · Deterministic thesis screen</p><h1>{thesisDecisionLabels[liveThesisScreen.decision]}</h1><p>{liveThesisScreen.decision === "advance_to_validation" ? "This hypothesis is structured strongly enough to earn real-world testing. It is not validated yet." : liveThesisScreen.decision === "revise_thesis" ? "Improve the problem, actor, execution path, or weak assumptions before spending validation effort." : liveThesisScreen.decision === "park_idea" ? "The thesis is too weak or has a fatal screen issue. Generate another direction or make a material revision." : "Complete the missing hypothesis inputs before SIFT can make a discovery decision."}</p></div>
+                <div className="result-verdict"><span>Thesis decision</span><strong>{liveThesisScreen.decision === "advance_to_validation" ? "WORTH TESTING" : liveThesisScreen.decision === "revise_thesis" ? "REVISE" : liveThesisScreen.decision === "park_idea" ? "PARK" : "INCOMPLETE"}</strong><small>Validation has not started — expected</small></div>
+              </div>
+              <div className="metric-grid thesis-metric-grid">
+                <Metric label="Thesis Screen Score" value={liveThesisScreen.rawThesisScore} note="Hypothesis quality before evidence" />
+                <Metric label="Advance Threshold" value={60} note="Minimum score plus G1, G2, and G7" />
+                <Metric label="Hypotheses Assessed" value={liveThesisScreen.assessedClaims} note={`${liveThesisScreen.totalClaims} locked claims`} />
+                <Metric label="Direct Evidence" value={0} note="Expected before validation begins" />
+              </div>
+              <div className="integrity-strip"><span>Decision basis <strong>Thesis only</strong></span><span>Validation evidence <strong>Not started</strong></span><span>Screen gates <strong>G1 · G2 · G7</strong></span><span>Input fingerprint <code>{liveThesisScreen.inputFingerprint}</code></span></div>
+              <section className="build-handoff-strip validation-handoff"><div><p className="eyebrow">Job 2 · Validate</p><strong>Now create the evidence that could not exist when the idea was generated.</strong><span>Start with interviews and falsification tests. Commitments, payments, production behavior, and audits become due only at later stages.</span></div><button className="button primary" disabled={!selectedIdea} onClick={beginValidation}>{selectedIdea ? "Start validation" : "Choose an idea first"}</button></section>
+              {(liveThesisScreen.validationErrors.length > 0 || liveThesisScreen.decisionReasons.length > 0) && <div className="issue-columns">
+                {liveThesisScreen.validationErrors.length > 0 && <IssueList title="Incomplete screen inputs" items={liveThesisScreen.validationErrors} tone="error" />}
+                {liveThesisScreen.decisionReasons.length > 0 && <IssueList title="Thesis decision reasons" items={liveThesisScreen.decisionReasons} tone="warning" />}
+              </div>}
+            </> : <>
+              <div className={`result-hero ${score.official && score.numericEligible && score.gateEligible ? "eligible" : "blocked"}`}>
+                <div><p className="eyebrow">Job 2 · Evidence-backed stage decision</p><h1>{!score.official ? "Validation incomplete" : score.numericEligible && score.gateEligible ? `Ready for ${stageLabels[state.review.stage]} human decision` : `Blocked at ${stageLabels[state.review.stage]}`}</h1><p>{!score.official ? `${score.validationErrors.length} input checks must be resolved before these totals become official.` : `${score.numericBlockers.length} numeric and ${score.gateBlockers.length} gate blockers remain.`}</p></div>
+                <div className="result-verdict"><span>Numeric + gate status</span><strong>{score.numericEligible && score.gateEligible ? "READY" : "NOT READY"}</strong><small>Evidence-backed stage readiness</small></div>
+              </div>
+              <div className="metric-grid">
+                <Metric label="Raw Thesis Score" value={score.rawThesisScore} note="Merit before evidence discount" />
+                <Metric label="Validated Score" value={score.validatedScore} note="Merit × evidence strength" />
+                <Metric label="Confidence Index" value={score.evidenceConfidenceIndex} note="How strong the evidence base is" />
+                <Metric label="Verified Coverage" value={score.verifiedEvidenceCoverage} note="Rubric weight at E2 or higher" suffix="%" />
+              </div>
+              <div className="integrity-strip"><span>Policy-adjusted score <strong>{score.policyAdjustedValidatedScore}</strong></span><span>Active cap <strong>{score.policyCap}</strong></span><span>Assessed <strong>{score.assessedClaims}/{score.totalClaims}</strong></span><span>Input fingerprint <code>{score.inputFingerprint}</code></span></div>
+              <section className="build-handoff-strip"><div><p className="eyebrow">Next workspace</p><strong>Carry this evidence-backed decision into a guarded Xahau / Evernode build flow.</strong><span>Your score, evidence state, selected route, and critical assumption become the build brief.</span></div><button className="button primary" disabled={!selectedIdea} onClick={() => setSection("build")}>{selectedIdea ? "Open Build" : "Choose an idea first"}</button></section>
+              {(score.validationErrors.length > 0 || score.numericBlockers.length > 0 || score.gateBlockers.length > 0) && <div className="issue-columns">
                 {score.validationErrors.length > 0 && <IssueList title="Validation errors" items={score.validationErrors} tone="error" />}
                 {score.numericBlockers.length > 0 && <IssueList title="Critical floors & thresholds" items={score.numericBlockers} tone="warning" />}
                 {score.gateBlockers.length > 0 && <IssueList title="Gate blockers" items={score.gateBlockers} tone="error" />}
-              </div>
-            )}
-            {score.warnings.length > 0 && <IssueList title="Policy caps" items={score.warnings} tone="neutral" />}
+              </div>}
+              {score.warnings.length > 0 && <IssueList title="Policy caps" items={score.warnings} tone="neutral" />}
+            </>}
             <section className="category-results">
-              <div className="section-title"><div><p className="eyebrow">Contribution by category</p><h2>Raw vs. evidence-adjusted</h2></div><span>Scale is relative to each category weight</span></div>
+              <div className="section-title"><div><p className="eyebrow">{state.review.stage === "thesis" ? "Thesis anatomy" : "Contribution by category"}</p><h2>{state.review.stage === "thesis" ? "Hypothesis strength by category" : "Raw vs. evidence-adjusted"}</h2></div><span>{state.review.stage === "thesis" ? "No validation multiplier is applied during idea screening" : "Scale is relative to each category weight"}</span></div>
               <div className="bar-table">
                 {score.categorySummaries.map((category) => (
-                  <div className="bar-row" key={category.id}>
+                  <div className={`bar-row ${state.review.stage === "thesis" ? "thesis-bar-row" : ""}`} key={category.id}>
                     <span className="category-number">{category.id.padStart(2, "0")}</span>
-                    <div className="bar-copy"><strong>{category.category}</strong><small>{category.assessedClaims}/{category.totalClaims} assessed · {category.verifiedCoverage}% verified</small></div>
-                    <div className="paired-bars"><span><i style={{ width: `${Math.min(100, category.rawPoints / category.weight * 100)}%` }} /></span><span><b style={{ width: `${Math.min(100, category.validatedPoints / category.weight * 100)}%` }} /></span></div>
-                    <div className="bar-values"><strong>{category.rawPoints}</strong><strong>{category.validatedPoints}</strong></div>
+                    <div className="bar-copy"><strong>{category.category}</strong><small>{category.assessedClaims}/{category.totalClaims} assessed{state.review.stage === "thesis" ? " · thesis only" : ` · ${category.verifiedCoverage}% verified`}</small></div>
+                    <div className={`paired-bars ${state.review.stage === "thesis" ? "single-thesis-bar" : ""}`}><span><i style={{ width: `${Math.min(100, category.rawPoints / category.weight * 100)}%` }} /></span>{state.review.stage !== "thesis" && <span><b style={{ width: `${Math.min(100, category.validatedPoints / category.weight * 100)}%` }} /></span>}</div>
+                    <div className="bar-values"><strong>{category.rawPoints}</strong>{state.review.stage !== "thesis" && <strong>{category.validatedPoints}</strong>}</div>
                   </div>
                 ))}
               </div>
@@ -4203,9 +4289,14 @@ function QuickRunPreviewPanel({ outcome, onInspect, onDismiss }: {
   const { preview, idea } = outcome;
   const score = preview.previewScore;
   const oneShot = outcome.kind === "one-shot";
-  const statusLabel = preview.status === "preview_ready" ? "READY"
-    : preview.status === "preview_not_ready" ? "NOT READY"
-      : "HOLD · INCOMPLETE";
+  const thesisScreen = oneShot ? outcome.thesisScreen : undefined;
+  const statusLabel = thesisScreen
+    ? thesisDecisionLabels[thesisScreen.decision]
+    : preview.status === "preview_ready" ? "READY"
+      : preview.status === "preview_not_ready" ? "NOT READY"
+        : "HOLD · INCOMPLETE";
+  const statusClass = thesisScreen?.decision ?? preview.status;
+  const citationResult = outcome.contextResearch?.result ?? outcome.research?.result;
   const uncertainties = preview.proposals.claims
     .map((proposal) => proposal.uncertainty.trim())
     .filter((value, index, values) => value && values.indexOf(value) === index)
@@ -4218,32 +4309,43 @@ function QuickRunPreviewPanel({ outcome, onInspect, onDismiss }: {
     hybrid: "Hybrid Xahau + Evernode",
   };
   return (
-    <section className={`quick-preview-result ${preview.status}`} aria-labelledby="quick-preview-title">
+    <section className={`quick-preview-result ${statusClass}`} aria-labelledby="quick-preview-title">
       <div className="quick-preview-head">
-        <div><p className="eyebrow">{oneShot ? "One-shot outcome" : outcome.research ? "Research & Run outcome" : "AI one-click outcome"}</p><h1 id="quick-preview-title">{idea.title}</h1><p>{idea.concept}</p></div>
-        <div className="quick-preview-status"><span>{oneShot ? "AI-automated thesis screen" : outcome.research ? "Cited AI-assisted preview" : "AI-assisted preview"}</span><strong>{statusLabel}</strong><small>Always provisional</small></div>
+        <div><p className="eyebrow">{oneShot ? "Job 1 · Idea discovery" : outcome.research ? "Research & Run outcome" : "AI one-click outcome"}</p><h1 id="quick-preview-title">{idea.title}</h1><p>{idea.concept}</p></div>
+        <div className="quick-preview-status"><span>{oneShot ? "Deterministic thesis screen" : outcome.research ? "Cited AI-assisted preview" : "AI-assisted preview"}</span><strong>{statusLabel}</strong><small>{oneShot ? "Not a validation verdict" : "Always provisional"}</small></div>
       </div>
-      <div className="quick-preview-explainer"><strong>{oneShot ? "AI generated or selected the idea, evaluated it, researched it, re-evaluated against the available evidence, and the locked local formula calculated this outcome." : "Local profile priority selected the idea when needed; AI proposed missing merits and gates; the locked local formula calculated the preview."}</strong><span>{oneShot && outcome.research ? outcome.research.appliedCount > 0 ? `${outcome.research.appliedCount} provider-cited public records and the AI evaluation were saved to the live project. Public research remains unverified DeskResearch/E1—not customer validation.` : outcome.research.noEvidenceReason || "No new grounded citation was available, so SIFT saved an evidence-gap outcome instead of inventing proof." : outcome.research?.committed ? `${outcome.research.appliedCount} reviewed public E1 record${outcome.research.appliedCount === 1 ? " was" : "s were"} saved; AI merits and gates remain a separate preview.` : outcome.research ? "Cited sources were found but not attached. Your live review was not changed." : "No evidence was created, upgraded, or verified. Your live review below was not changed."}</span></div>
-      <div className="quick-preview-grid">
+      <div className="quick-preview-explainer"><strong>{oneShot ? "AI generated a fresh slate and described the hypotheses; SIFT's locked thesis formula decided whether the winner deserves real-world testing." : "Local profile priority selected the idea when needed; AI proposed missing merits and gates; the locked local formula calculated the preview."}</strong><span>{oneShot ? outcome.contextResearch?.sourceCount ? `${outcome.contextResearch.sourceCount} cited public sources informed the screen as market context only. The validation ledger remains empty because no interviews, tests, commitments, payments, production behavior, or audits exist yet.` : outcome.contextResearch?.note || "No direct evidence was expected or required. Validation begins after this screen." : outcome.research?.committed ? `${outcome.research.appliedCount} reviewed public E1 record${outcome.research.appliedCount === 1 ? " was" : "s were"} saved; AI merits and gates remain a separate preview.` : outcome.research ? "Cited sources were found but not attached. Your live review was not changed." : "No evidence was created, upgraded, or verified. Your live review below was not changed."}</span></div>
+      {oneShot ? <div className="quick-preview-grid">
+        <div><span>Selection</span><strong>Fresh automated match</strong><small>Personalized priority {preview.selectionPriority.toFixed(1)} / 100</small></div>
+        <div><span>Hypotheses screened</span><strong>{thesisScreen?.assessedClaims ?? score.assessedClaims} / {thesisScreen?.totalClaims ?? score.totalClaims}</strong><small>Quality and falsifiability—not proof</small></div>
+        <div><span>Screen gates</span><strong>{preview.filledGateIds.filter((id) => id === "G1" || id === "G2" || id === "G7").length} / 3</strong><small>Harm, problem specificity, and validation path</small></div>
+        <div><span>Protocol route</span><strong>{previewRouteLabel[preview.previewReview.protocolRoute]}</strong><small>{preview.protocolRouteFilled ? `Hypothesis from idea route: ${idea.route}` : "Still unresolved"}</small></div>
+        <div><span>Direct validation</span><strong>Not started</strong><small>0 records — expected for a new idea</small></div>
+      </div> : <div className="quick-preview-grid">
         <div><span>Selection</span><strong>{preview.selectedBy === "existing-user-choice" ? "Your selected idea" : "Automated exploration match"}</strong><small>Local profile priority {preview.selectionPriority.toFixed(1)} / 100</small></div>
         <div><span>AI-filled merits</span><strong>{preview.filledClaimIds.length} / {preview.previewReview.claims.length}</strong><small>{preview.missingClaimIds.length} still unknown</small></div>
-        <div><span>AI-filled gates</span><strong>{preview.filledGateIds.length} / {preview.previewReview.gates.length}</strong><small>{oneShot ? "Saved with AI provenance" : "Shadow copy only"}</small></div>
+        <div><span>AI-filled gates</span><strong>{preview.filledGateIds.length} / {preview.previewReview.gates.length}</strong><small>Shadow copy only</small></div>
         <div><span>Protocol route</span><strong>{previewRouteLabel[preview.previewReview.protocolRoute]}</strong><small>{preview.protocolRouteFilled ? `Derived from idea route: ${idea.route}` : "Existing route preserved or still unresolved"}</small></div>
-        <div><span>{oneShot ? "Evidence in live review" : outcome.research ? "Cited evidence in preview" : "Existing approved evidence"}</span><strong>{preview.previewReview.artifacts.length}</strong><small>{outcome.research ? `${outcome.research.appliedCount} public E1 record${outcome.research.appliedCount === 1 ? "" : "s"} ${outcome.research.committed ? "attached" : "not attached"}` : "Nothing synthesized"}</small></div>
-      </div>
-      <div className="quick-preview-metrics">
-        <div><span>{oneShot ? "Raw thesis" : "Preview raw thesis"}</span><strong>{score.rawThesisScore.toFixed(1)}</strong></div>
-        <div><span>{oneShot ? "Evidence-adjusted" : "Evidence-validated preview"}</span><strong>{score.validatedScore.toFixed(1)}</strong></div>
+        <div><span>{outcome.research ? "Cited evidence in preview" : "Existing approved evidence"}</span><strong>{preview.previewReview.artifacts.length}</strong><small>{outcome.research ? `${outcome.research.appliedCount} public E1 record${outcome.research.appliedCount === 1 ? "" : "s"} ${outcome.research.committed ? "attached" : "not attached"}` : "Nothing synthesized"}</small></div>
+      </div>}
+      {oneShot ? <div className="quick-preview-metrics thesis-screen-metrics">
+        <div><span>Thesis screen</span><strong>{(thesisScreen?.rawThesisScore ?? score.rawThesisScore).toFixed(1)}</strong></div>
+        <div><span>Advance threshold</span><strong>60.0</strong></div>
+        <div><span>Public context coverage</span><strong>{outcome.contextResearch?.claimCoverage ?? 0}%</strong></div>
+        <div><span>Direct evidence required now</span><strong>0</strong></div>
+      </div> : <div className="quick-preview-metrics">
+        <div><span>Preview raw thesis</span><strong>{score.rawThesisScore.toFixed(1)}</strong></div>
+        <div><span>Evidence-validated preview</span><strong>{score.validatedScore.toFixed(1)}</strong></div>
         <div><span>Evidence confidence</span><strong>{score.evidenceConfidenceIndex.toFixed(1)}</strong></div>
         <div><span>Verified coverage</span><strong>{score.verifiedEvidenceCoverage.toFixed(1)}%</strong></div>
-      </div>
+      </div>}
       <div className="quick-preview-notes">
         <div><strong>Critical assumption</strong><span>{idea.criticalAssumption}</span></div>
         <div><strong>Suggested next experiment</strong><span>{idea.experiment}</span></div>
         {uncertainties.length > 0 && <div><strong>AI-reported uncertainty</strong><ul>{uncertainties.map((item) => <li key={item}>{item}</li>)}</ul></div>}
       </div>
-      {outcome.research?.result && <details className="quick-preview-citations"><summary>{outcome.research.result.citations.length} cited public source{outcome.research.result.citations.length === 1 ? "" : "s"}</summary><ul>{outcome.research.result.citations.map((citation) => <li key={citation.sourceId}><strong>{citation.title}</strong><span>{citationDomain(citation.url)}</span><code>{citation.url}</code></li>)}</ul></details>}
-      <div className="quick-preview-footer"><span>Model {preview.provider} · {preview.model} · Context {preview.sourceInputFingerprint.slice(0, 12)}…</span><div><button className="button primary" onClick={onInspect}>{outcome.research?.committed ? "Open evidence ledger" : preview.selectedBy === "existing-user-choice" ? "Open rigorous review" : "Review the chosen idea"}</button><button className="text-button" onClick={onDismiss}>{oneShot ? "Dismiss summary" : "Dismiss preview"}</button></div></div>
+      {citationResult && <details className="quick-preview-citations"><summary>{citationResult.citations.length} cited public context source{citationResult.citations.length === 1 ? "" : "s"}</summary><ul>{citationResult.citations.map((citation) => <li key={citation.sourceId}><strong>{citation.title}</strong><span>{citationDomain(citation.url)}</span><code>{citation.url}</code></li>)}</ul></details>}
+      <div className="quick-preview-footer"><span>Model {preview.provider} · {preview.model} · Context {preview.sourceInputFingerprint.slice(0, 12)}…</span><div><button className="button primary" onClick={onInspect}>{oneShot ? "Start validation" : outcome.research?.committed ? "Open evidence ledger" : preview.selectedBy === "existing-user-choice" ? "Open rigorous review" : "Review the chosen idea"}</button><button className="text-button" onClick={onDismiss}>{oneShot ? "Dismiss summary" : "Dismiss preview"}</button></div></div>
     </section>
   );
 }
@@ -4294,18 +4396,18 @@ function Overview({ state, score, selectedIdea, desktopAvailable, oneShotReady, 
   onUpdateProject: (patch: Partial<ProjectDetails>) => void;
 }) {
   const steps = [
-    { id: "ideas" as const, number: "01", title: "Find & choose an idea", meta: selectedIdea ? "Idea chosen" : `${state.ideas.length} ideas`, done: Boolean(selectedIdea) },
-    { id: "review" as const, number: "02", title: "Evaluate what must be true", meta: `${score.assessedClaims}/${score.totalClaims} answered`, done: score.assessedClaims === score.totalClaims },
-    { id: "evidence" as const, number: "03", title: "Add proof", meta: `${state.review.artifacts.length} evidence records`, done: state.review.artifacts.length > 0 },
-    { id: "results" as const, number: "04", title: "Read the decision", meta: score.official ? (score.numericEligible && score.gateEligible ? "Ready" : "Blocked") : "Provisional", done: score.official },
+    { id: "ideas" as const, number: "01", title: "Generate & choose", meta: selectedIdea ? "Idea chosen" : `${state.ideas.length} ideas`, done: Boolean(selectedIdea) },
+    { id: "review" as const, number: "02", title: "Screen the thesis", meta: `${score.assessedClaims}/${score.totalClaims} hypotheses`, done: score.assessedClaims === score.totalClaims },
+    { id: "evidence" as const, number: "03", title: "Run validation", meta: state.review.stage === "thesis" ? "Not started — expected" : `${state.review.artifacts.length} evidence records`, done: state.review.stage !== "thesis" },
+    { id: "results" as const, number: "04", title: "Read the stage decision", meta: state.review.stage === "thesis" ? "Worth testing?" : score.official ? (score.numericEligible && score.gateEligible ? "Ready" : "Blocked") : "Provisional", done: score.official },
     { id: "build" as const, number: "05", title: "Build the winner", meta: selectedIdea ? `${selectedIdea.route} toolchain` : "Choose an idea first", done: false },
   ];
   return (
     <div className="page-section overview-page">
-      <PageHeading eyebrow="Workspace" title="Start here." description="Five steps from idea to evidence-backed build." />
+      <PageHeading eyebrow="Workspace" title="Two jobs. One honest path." description="First find a thesis worth testing. Then collect real-world evidence to validate it." />
       <section className="quick-run-launch">
-        <div><span className="quick-run-kicker">One-shot AI workflow</span><h2>Generate → Evaluate → Evidence → Decision.</h2><p>One action generates and selects an idea—or uses your selected one—evaluates the full rubric, finds cited public evidence, re-evaluates against it, and saves the deterministic outcome.</p></div>
-        <div><button className="button primary" disabled={quickRunBusy} onClick={onOneShotRun}>{quickRunBusy ? "Running everything…" : oneShotReady ? selectedIdea ? "Run selected idea" : "Run Everything" : desktopAvailable ? "Connect OpenRouter" : "Model options"}</button><button className="button secondary quick-guided-button" disabled={quickRunBusy} onClick={onQuickRun}>Preview only</button><button className="text-button" disabled={quickRunBusy} onClick={onGuidedQuickRun}>Guided mode</button><small>Clicking sends the idea/profile context and up to 12 saved evidence excerpts to OpenRouter; model and web-search charges apply.</small></div>
+        <div><span className="quick-run-kicker">Job 1 · Explore</span><h2>Fresh ideas → Thesis screen → Worth testing?</h2><p>One action always generates a new slate, selects the strongest profile match, screens hypothesis quality, and creates the handoff into real validation.</p></div>
+        <div><button className="button primary" disabled={quickRunBusy} onClick={onOneShotRun}>{quickRunBusy ? "Generating & screening…" : oneShotReady ? "Generate & screen" : desktopAvailable ? "Connect an AI model" : "Model options"}</button>{state.review.stage !== "thesis" && selectedIdea && <><button className="button secondary quick-guided-button" disabled={quickRunBusy} onClick={onQuickRun}>Preview validation state</button><button className="text-button" disabled={quickRunBusy} onClick={onGuidedQuickRun}>Guided validation</button></>}<small>Cloud runs send the generation profile and public idea brief to the selected provider. OpenRouter may add cited public context; it is never treated as customer proof.</small></div>
       </section>
       <div className="overview-grid">
         <section className="overview-main">
@@ -4319,8 +4421,8 @@ function Overview({ state, score, selectedIdea, desktopAvailable, oneShotReady, 
           </div>
         </section>
         <aside className="overview-aside">
-          <div className="current-thesis"><img className="thesis-mark" src={SIFT_BRAND_TORNADO_URL} alt="" aria-hidden="true" /><p className="eyebrow">Current idea</p><h2>{selectedIdea?.title || "No idea selected"}</h2><p>{selectedIdea?.concept || "Generate ideas or add your own, then choose one to evaluate."}</p><button className="button secondary" onClick={() => onNavigate(selectedIdea ? "review" : "ideas")}>{selectedIdea ? "Continue evaluation" : "Find an idea"}</button></div>
-          <details className="boundary-card"><summary>Decision boundaries</summary><strong>SIFT calculates</strong><ul><li>Input validity, scores, caps, floors, and gates</li></ul><strong>You decide</strong><ul><li>Whether the evidence is truthful and the idea is worth pursuing</li></ul></details>
+          <div className="current-thesis"><img className="thesis-mark" src={SIFT_BRAND_TORNADO_URL} alt="" aria-hidden="true" /><p className="eyebrow">Current idea</p><h2>{selectedIdea?.title || "No idea selected"}</h2><p>{selectedIdea?.concept || "Generate ideas or add your own, then choose one to screen."}</p><button className="button secondary" onClick={() => onNavigate(selectedIdea ? state.review.stage === "thesis" ? "results" : "evidence" : "ideas")}>{selectedIdea ? state.review.stage === "thesis" ? "Read thesis screen" : "Continue validation" : "Find an idea"}</button></div>
+          <details className="boundary-card"><summary>Decision boundaries</summary><strong>Explore calculates</strong><ul><li>Hypothesis quality and whether the idea deserves testing</li></ul><strong>Validate proves</strong><ul><li>Whether real users, behavior, tests, and economics support advancement</li></ul></details>
         </aside>
       </div>
     </div>
@@ -4398,8 +4500,10 @@ function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNaviga
       "",
       `Project: ${state.project.title || "Untitled project"}`,
       `Opportunity boundary: ${state.project.domain || "Not set"}`,
-      `Decision status: ${score.official ? score.numericEligible && score.gateEligible ? "Ready for human build decision" : "Blocked" : "Provisional"}`,
-      `Validated score: ${score.validatedScore.toFixed(1)} / 100`,
+      `Decision status: ${state.review.stage === "thesis" ? "Thesis screen only — validation not started" : score.official ? score.numericEligible && score.gateEligible ? "Ready for human build decision" : "Blocked" : "Provisional"}`,
+      state.review.stage === "thesis"
+        ? `Thesis screen score: ${score.rawThesisScore.toFixed(1)} / 100`
+        : `Validated score: ${score.validatedScore.toFixed(1)} / 100`,
       `Evidence confidence: ${score.evidenceConfidenceIndex.toFixed(1)} / 100`,
       `Verified coverage: ${score.verifiedEvidenceCoverage.toFixed(1)}%`,
       `Evidence records: ${state.review.artifacts.length}`,
@@ -4413,8 +4517,9 @@ function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNaviga
       "- Never include signing secrets or private keys.",
       "- SIFT does not sign, submit, spend, lease, or deploy.",
       "- Use testnet and offline simulation before any live-network step.",
+      ...(state.review.stage === "thesis" ? ["- This build is a validation experiment, not evidence of customer demand or production readiness."] : []),
     ].join("\n");
-  }, [score, selectedIdea, state.project.domain, state.project.title, state.review.artifacts.length]);
+  }, [score, selectedIdea, state.project.domain, state.project.title, state.review.artifacts.length, state.review.stage]);
 
   async function refreshTools() {
     const bridge = window.sift?.build;
@@ -4490,17 +4595,19 @@ function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNaviga
 
   return (
     <div className="page-section build-page">
-      <PageHeading eyebrow="Build" title="Turn the winner into a working project." description="Move from validated brief to starter code, simulation, and bounded proof—without handing SIFT a wallet key." />
+      <PageHeading eyebrow="Build" title="Turn the winner into a working project." description={state.review.stage === "thesis" ? "Use the toolchain for a validation prototype—not as evidence that the newborn business is already proven." : "Move from an evidence-backed brief to starter code, simulation, and bounded proof—without handing SIFT a wallet key."} />
 
       {!selectedIdea ? (
         <section className="build-empty"><img src={SIFT_BRAND_TORNADO_URL} alt="" aria-hidden="true" /><div><p className="eyebrow">Idea required</p><h2>Choose the opportunity before choosing the toolchain.</h2><p>The route, critical assumption, and first test become the build brief.</p><button className="button primary" onClick={() => onNavigate("ideas")}>Choose an idea</button></div></section>
       ) : (
         <>
           <section className="build-hero">
-            <div><span className={`build-readiness ${score.official && score.numericEligible && score.gateEligible ? "ready" : "provisional"}`}>{score.official && score.numericEligible && score.gateEligible ? "Decision ready" : "Proceed with caution"}</span><p className="eyebrow">Selected opportunity</p><h2>{selectedIdea.title}</h2><p>{selectedIdea.concept}</p></div>
-            <dl><div><dt>Route</dt><dd>{selectedIdea.route}</dd></div><div><dt>Validated</dt><dd>{score.validatedScore.toFixed(1)}</dd></div><div><dt>Confidence</dt><dd>{score.evidenceConfidenceIndex.toFixed(1)}</dd></div><div><dt>Evidence</dt><dd>{state.review.artifacts.length}</dd></div></dl>
+            <div><span className={`build-readiness ${state.review.stage !== "thesis" && score.official && score.numericEligible && score.gateEligible ? "ready" : "provisional"}`}>{state.review.stage === "thesis" ? "Validation prototype" : score.official && score.numericEligible && score.gateEligible ? "Decision ready" : "Proceed with caution"}</span><p className="eyebrow">Selected opportunity</p><h2>{selectedIdea.title}</h2><p>{selectedIdea.concept}</p></div>
+            <dl><div><dt>Route</dt><dd>{selectedIdea.route}</dd></div><div><dt>{state.review.stage === "thesis" ? "Thesis" : "Validated"}</dt><dd>{state.review.stage === "thesis" ? score.rawThesisScore.toFixed(1) : score.validatedScore.toFixed(1)}</dd></div><div><dt>Stage</dt><dd>{stageLabels[state.review.stage]}</dd></div><div><dt>Evidence</dt><dd>{state.review.artifacts.length}</dd></div></dl>
             <div className="build-brief-actions"><button className="button primary" onClick={() => void navigator.clipboard.writeText(brief).then(() => onToast("Build brief copied"))}>Copy build brief</button><button className="button secondary" onClick={() => downloadFile("sift-build-brief.md", brief, "text/markdown")}>Download .md</button></div>
           </section>
+
+          {state.review.stage === "thesis" && <section className="build-desktop-note"><strong>Validation has not started.</strong><span>Anything built here is an experiment for learning. It does not count as customer demand, production behavior, or a completed audit.</span></section>}
 
           <section className="build-pipeline" aria-label="Build pipeline">
             <article><span>01</span><strong>Scaffold</strong><p>Choose an explicit starter pattern from the selected protocol route.</p><small>Evernode MCP / Xahau MCP</small></article>

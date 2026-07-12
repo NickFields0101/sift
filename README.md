@@ -73,18 +73,20 @@ The two review assistants are available only in the desktop edition with a conne
 
 If you choose a cloud provider, the relevant idea, review context, or pasted evidence source is sent to that provider for the requested operation. Use Ollama or LM Studio when the material must remain on the device.
 
-## Run Everything: the one-shot workflow
+## Generate & Screen: the one-click idea workflow
 
-In the desktop app, connect OpenRouter once and choose **Run Everything**. SIFT then completes the full sequence without stage approvals:
+SIFT separates two jobs that must not be scored as if they were the same thing:
 
-1. Generate four ideas when no idea is selected and use the local profile-priority formula to choose the strongest exploration match.
-2. Ask the model to evaluate all unanswered rubric claims and non-compensable gates.
-3. Search public sources, accept only exact provider-cited excerpts, and automatically attach every grounded finding at `DeskResearch / E1`.
-4. Re-evaluate the idea against that evidence and run the locked deterministic calculator.
+1. **Explore:** generate a new business hypothesis and decide whether it is worth testing.
+2. **Validate:** collect real-world evidence after the idea exists and decide whether it has earned stage advancement.
 
-The final project update is atomic: the generated slate, selected idea, AI-tagged evaluation, cited evidence, and calculated outcome are saved together only after every stage succeeds. One undo restores the complete pre-run idea, project, and review state. The result remains an **AI-automated thesis screen**, not a human-verified investment or launch decision. Public research cannot manufacture interviews, commitments, payments, tests, audits, production behavior, or E2–E4 proof. Contradictory evidence stays visible and unacknowledged, so the honest automated outcome may be **HOLD / incomplete**.
+In the desktop app, connect any supported model and choose **Generate & screen**. SIFT always generates four fresh candidates, uses the local profile-priority formula to choose the strongest exploration match, and asks the model to rate the specificity, coherence, and falsifiability of all 51 thesis hypotheses. Missing hypotheses receive low thesis merit; the model is explicitly forbidden from pretending that interviews, commitments, payments, tests, production behavior, or audits already happened.
 
-The Run Everything button itself is the instruction to use the configured OpenRouter model and web search; there are no additional confirmation dialogs during the run. Model-token and search charges apply. The public search brief excludes personality scores, wallet data, stored customer identities, and private evidence bodies, while an evaluation of an existing review may include a bounded set of its stored evidence excerpts.
+With OpenRouter, SIFT may also gather exact-citation public context about markets, alternatives, regulation, and protocol capabilities. That context may change the AI's hypothesis assessment, but it is not written into the direct-validation ledger and cannot raise the deterministic thesis score through an evidence multiplier. Local and other compatible models simply skip public web context.
+
+The locked thesis screen returns **Advance to validation**, **Revise & rescreen**, **Park this idea**, or **Screen incomplete**. Its formula uses raw hypothesis merit plus the G1, G2, and G7 screen gates. It never requires customer evidence. The generated slate, selected idea, and thesis screen are saved atomically, and one undo restores the prior project.
+
+Choosing **Start validation** opens Discovery with an intentionally empty evidence ledger and resets AI-owned screen gates. `0 direct records` is the correct starting state—not an error. From that point forward, SIFT's strict evidence grades, verification requirements, caps, floors, counterevidence rules, and formal stage decisions apply.
 
 ## Optional preview and guided modes
 
@@ -96,7 +98,7 @@ When a cloud model is connected, Quick Run confirms before sending the operation
 
 ## Optional manual source review
 
-Choose **Review sources manually** from Evidence when you want the older checkpointed research path. It generates or selects an idea, drafts missing inputs in an isolated copy, searches public sources, maps exact citation excerpts to a bounded set of publicly researchable rubric claims, and then pauses for one consolidated source review before the live project changes.
+Choose **Find cited public context** from Validation Evidence for the checkpointed research path. It searches public sources, maps exact citation excerpts to a bounded set of publicly researchable rubric claims, and pauses for one consolidated source review before the live project changes.
 
 The research connector uses OpenRouter's current [`openrouter:web_search` server tool](https://openrouter.ai/docs/guides/features/server-tools/web-search) with the Exa engine and fixed result/context limits. It does not use the deprecated web plugin and never fetches arbitrary citation URLs itself. A source can enter the approval packet only when OpenRouter returns an HTTPS `url_citation` annotation with nonempty provider-supplied content and the proposed excerpt occurs exactly in that content. URLs written only in model prose are ignored.
 
@@ -119,13 +121,13 @@ Upstream XAHC releases currently cover macOS arm64 and Linux x86_64; Windows req
 
 ## Use the framework
 
-1. Select **Run Everything** for the one-shot workflow, or choose a manual starting point.
+1. Select **Generate & screen** for the one-click idea workflow, or choose a manual starting point.
 2. Generate ideas with a connected model, add your own, try the examples, or copy the prompt into any LLM.
-3. Choose **Run Everything** to generate/select, evaluate, research, and calculate automatically. Use **Preview only**, **Guided mode**, or **Review sources manually** when you want a narrower or checkpointed flow. Optional 0–100 exploration estimates only order the idea list; they are not validated scores.
-4. Open **Evaluate**, choose the target stage and archetype, and assess all 51 atomic claims with merit from 0–5. In the desktop app, you may ask the connected model to draft unanswered claim merits and gate recommendations, then approve only the useful proposals.
-5. Open **Evidence**, attach proof manually, use the desktop organizer with pasted source text, or select **Find public evidence** to enter Research & Run. Public findings stay E1; the validator checks type ceilings, dates, verification, claim links, duplicates, and counterevidence.
+3. Read the deterministic thesis decision. A new idea is judged on hypothesis quality, not on evidence that could not exist yet. Optional 0–100 exploration estimates only order the idea list; they are not validated scores.
+4. Choose **Start validation** when the winner deserves testing. Discovery begins with zero direct evidence and unresolved formal gates.
+5. Open **Validation evidence**, attach real observations and tests, use the desktop organizer with actual source material, or select **Find cited public context**. Public findings stay E1; the validator checks type ceilings, dates, verification, claim links, duplicates, and counterevidence.
 6. Resolve the eight non-compensable gates.
-7. Open **Decision** to read the four separate outputs and every active cap, floor, validation error, and blocker.
+7. Open **Stage decision** to read the evidence-backed outputs and every active cap, floor, validation error, and blocker.
 8. Open **Build** to export the reviewed build brief, inspect local tool readiness, and create a guarded starter artifact.
 9. Use **Settings & data → Import & export** for a reproducible JSON packet or claim-level CSV.
 
@@ -138,6 +140,7 @@ Upstream XAHC releases currently cover macOS arm64 and Linux x86_64; Windows req
 - Rubric manifest SHA-256: `fa940feea694ee4df4aa064d2fc418e68a879f318c11e72cfbc4bf5a9d1c1d67`
 - A claim is scored only to the strongest fully eligible linked artifact. Rank and evidence type must be satisfied by the same artifact for typed caps and stage floors.
 - Rounding: midpoint-to-even where required by the canonical calculator
+- An empty evidence ledger is valid. Thesis screening ignores evidence entirely; Discovery and later stages remain blocked until their explicit evidence floors are met.
 
 **Numeric + gate ready** is not a final investment, financing, launch, safety, or governance decision. Team coverage, role design, financing approval, independent review, and human judgment remain separate.
 
@@ -152,7 +155,8 @@ Upstream XAHC releases currently cover macOS arm64 and Linux x86_64; Windows req
 - Computed fields in imported packets are ignored and recalculated locally.
 - API credentials are never stored in project JSON or browser storage.
 - Evaluation and evidence AI drafts remain staged until the user explicitly applies them; each application can be undone in one click.
-- An AI one-click outcome is calculated in an isolated shadow review, remains provisional, and cannot overwrite the live review or create or verify evidence.
+- Generate & Screen saves only the fresh idea slate and E0 thesis screen atomically. It never creates or verifies direct validation evidence.
+- The separate Preview mode is calculated in an isolated shadow review and cannot overwrite the live review.
 - Research & Run accepts only exact provider-returned citation excerpts, keeps public findings at DeskResearch/E1, and commits the complete packet atomically only after one consolidated confirmation.
 - Public research sends a public-safe idea brief to OpenRouter, the selected upstream model provider, and OpenRouter's configured Exa search service. It never sends raw personality answers, wallet material, or the full local evidence ledger to the search step.
 - The evidence organizer does not persist the full pasted source. Approved artifacts retain only the accepted excerpt, source fingerprint, and model provenance.

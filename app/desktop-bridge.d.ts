@@ -68,8 +68,11 @@ export interface DraftEvaluationInput extends LlmConnectionOptions {
   projectContext: string;
   /** Optional canonical rubric claim IDs to evaluate. Omit to request the complete catalog. */
   claimIds?: string[];
-  /** Quick Run may refresh only canonical gates after evidence changes. */
-  scope?: "claims_and_gates" | "gates_only";
+  /**
+   * Quick Run may request the normal review, refresh only canonical gates after
+   * evidence changes, or screen a new hypothesis without implying direct validation.
+   */
+  scope?: "claims_and_gates" | "gates_only" | "thesis_screen";
 }
 
 export interface EvaluationClaimProposal {
