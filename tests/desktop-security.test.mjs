@@ -42,10 +42,48 @@ test("AI generation cannot write deterministic review inputs", async () => {
   assert.doesNotMatch(generationFunction, /updateReview|updateClaim|updateGate|artifacts|gates|claims/);
 });
 
+test("selecting a different idea cannot inherit the prior idea's review or evidence", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const freshStart = page.indexOf("function freshIdeaScreenReview");
+  const freshEnd = page.indexOf("function reviewHasMaterialWork", freshStart);
+  const beginStart = page.indexOf("function beginReview");
+  const beginEnd = page.indexOf("function currentLlmInput", beginStart);
+  assert.ok(freshStart >= 0 && freshEnd > freshStart && beginStart >= 0 && beginEnd > beginStart);
+
+  const freshReview = page.slice(freshStart, freshEnd);
+  const beginReview = page.slice(beginStart, beginEnd);
+  assert.match(freshReview, /\.\.\.defaultReview\(\)/);
+  assert.match(freshReview, /archetype: current\.archetype/);
+  assert.match(freshReview, /stage: "thesis"/);
+  assert.match(beginReview, /const selectingDifferentIdea = state\.project\.selectedIdeaId !== idea\.id/);
+  assert.match(beginReview, /reviewHasMaterialWork\(state\.review\)[^]*window\.confirm/);
+  assert.match(beginReview, /const review = selectingDifferentIdea \? freshIdeaScreenReview\(state\.review\) : state\.review/);
+  assert.match(beginReview, /review,\s*\}\)\)/);
+  assert.match(beginReview, /draftQuickRunEvaluation\([^]*review,[^]*selectingDifferentIdea \? "" : evaluationNotes/);
+  assert.doesNotMatch(freshReview, /artifacts:\s*current\.artifacts|claims:\s*current\.claims|gates:\s*current\.gates/);
+});
+
+test("thesis screens do not expose validation-only controls", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const evidenceStart = page.indexOf('section === "evidence"');
+  const evidenceEnd = page.indexOf('section === "results"', evidenceStart);
+  const overviewStart = page.indexOf("function Overview");
+  assert.ok(evidenceStart >= 0 && evidenceEnd > evidenceStart && overviewStart >= 0);
+
+  const evidenceSection = page.slice(evidenceStart, evidenceEnd);
+  const overview = page.slice(overviewStart);
+  assert.match(evidenceSection, /state\.review\.stage === "thesis"[^]*Start validation/);
+  assert.match(evidenceSection, /state\.review\.stage !== "thesis" && <>[^]*Find cited public context[^]*Organize evidence you already have[^]*Add an evidence record/);
+  assert.match(page, /STAGES\.filter\(\(item\) => item !== "thesis"\)/);
+  assert.match(page, /state\.review\.gates\.filter\(\(gate\) => state\.review\.stage !== "thesis" \|\| gate\.id === "G1" \|\| gate\.id === "G2" \|\| gate\.id === "G7"\)/);
+  assert.match(page, /state\.review\.stage !== "thesis" && <label className="compact-field"><span>Evidence<\/span>/);
+  assert.match(overview, /state\.review\.stage !== "thesis" && selectedIdea && <>[^]*Preview validation state/);
+});
+
 test("AI one-click Quick Run calculates only an isolated preview", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const quickStart = page.indexOf("async function startQuickRun");
-  const quickEnd = page.indexOf("async function startResearchRun", quickStart);
+  const quickEnd = page.indexOf("async function startOneShotRun", quickStart);
   assert.ok(quickStart >= 0 && quickEnd > quickStart);
   const quickFunction = page.slice(quickStart, quickEnd);
   assert.match(quickFunction, /setQuickRunMode\("auto-preview"\)/);
@@ -55,7 +93,7 @@ test("AI one-click Quick Run calculates only an isolated preview", async () => {
   assert.match(quickFunction, /calculateGenerationPriority\(state\.profile, chosenIdea\.scores\)/);
   assert.match(quickFunction, /const previewReview = selectedAtStart \? state\.review : freshQuickPreviewReview\(state\.review\)/);
   assert.match(quickFunction, /buildQuickRunPreview\([^]*scoreReview\)/);
-  assert.match(quickFunction, /setQuickRunOutcome\(\{ preview, idea: chosenIdea \}\)/);
+  assert.match(quickFunction, /setQuickRunOutcome\(\{ kind: "preview", preview, idea: chosenIdea \}\)/);
   assert.match(quickFunction, /setState\(\(current\) => \(\{ \.\.\.current, ideas: \[\.\.\.current\.ideas, \.\.\.candidates\] \}\)\)/);
   assert.equal((quickFunction.match(/\bsetState\(/g) ?? []).length, 1);
   assert.doesNotMatch(quickFunction, /applyEvaluationProposals|applyEvidenceProposals|applyGateProposal|updateReview|updateClaim|updateGate|setSelectedEvaluationClaims|reviewerVerified\s*:\s*true/);
@@ -64,6 +102,41 @@ test("AI one-click Quick Run calculates only an isolated preview", async () => {
   assert.match(page, /No evidence was created, upgraded, or verified\. Your live review[^<]*not changed/);
   assert.match(page, /Derived from idea route:/);
   assert.match(page, /Existing route preserved or still unresolved/);
+});
+
+test("Generate & Screen separates a fresh thesis decision from venture validation", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const start = page.indexOf("async function startOneShotRun");
+  const end = page.indexOf("async function startResearchRun", start);
+  assert.ok(start >= 0 && end > start);
+  const oneShot = page.slice(start, end);
+
+  assert.match(oneShot, /setQuickRunMode\("one-shot"\)/);
+  assert.match(oneShot, /bridge\.llm\.generateIdeas\(/);
+  assert.match(oneShot, /bridge\.llm\.draftEvaluation\(/);
+  assert.match(oneShot, /bridge\.llm\.researchEvidence\(/);
+  assert.match(oneShot, /freshIdeaScreenReview\(stateAtStart\.review\)/);
+  assert.match(oneShot, /scope: "thesis_screen"/);
+  assert.match(oneShot, /screenThesis\(finalPreview\.previewReview\)/);
+  assert.match(oneShot, /contextResult \? publicContextSummaryFor\(contextResult\) : ""/);
+  assert.match(oneShot, /const finalPreview = await draftEvaluationFor/);
+  assert.match(oneShot, /review: finalReview/);
+  assert.match(oneShot, /localStorage\.setItem\(STORAGE_KEY, JSON\.stringify\(nextState\)\)/);
+  assert.match(oneShot, /setState\(nextState\)/);
+  assert.ok(
+    oneShot.indexOf("localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState))")
+      < oneShot.indexOf("setState(nextState)"),
+    "durable local persistence is checked before the live React state is committed",
+  );
+  assert.equal((oneShot.match(/\bsetState\(/g) ?? []).length, 1, "the live project is committed once after the screen finishes");
+  assert.match(oneShot, /project: stateAtCommit\.project/);
+  assert.match(oneShot, /ideas: stateAtCommit\.ideas/);
+  assert.doesNotMatch(oneShot, /selectedAtStart|completeAutomatedResearchRun|applyResearchEvidenceBatch|committed: true/);
+  assert.doesNotMatch(oneShot, /window\.confirm|reviewerVerified\s*:\s*true|acknowledgedCounterEvidenceIds/);
+  assert.match(page, /Fresh ideas → Public context → Thesis screen → Discovery decision/);
+  assert.match(page, /No customer evidence is expected yet/);
+  assert.match(page, /Validation has not started/);
+  assert.match(page, /ADVANCE TO VALIDATION/);
 });
 
 test("Research & Run keeps cited evidence transient until one consolidated approval", async () => {
@@ -176,8 +249,8 @@ test("raw personality responses are session-only and excluded from projects and 
   assert.match(exportPacket, /\.\.\.\(includeProfile \? \{ profile: state\.profile \} : \{\}\)/);
   assert.doesNotMatch(exportPacket, /personalityAnswers|PERSONALITY_DRAFT_KEY|sessionStorage/);
 
-  const promptStart = page.indexOf("const prompt = useMemo");
-  const promptEnd = page.indexOf("const visibleModels", promptStart);
+  const promptStart = page.indexOf("function generationPromptFor");
+  const promptEnd = page.indexOf("function recordFrom", promptStart);
   assert.ok(promptStart >= 0 && promptEnd > promptStart);
   const promptBuilder = page.slice(promptStart, promptEnd);
   assert.match(promptBuilder, /sharePersonalityScoresWithAi/);

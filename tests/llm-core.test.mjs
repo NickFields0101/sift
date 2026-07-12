@@ -325,6 +325,7 @@ test("generates ideas through OpenRouter without exposing its key in output", as
   assert.equal(request.headers.Authorization, "Bearer openrouter-test-key");
   assert.equal(request.body.model, "openai/gpt-4.1-mini");
   assert.equal(request.body.stream, false);
+  assert.deepEqual(request.body.provider, { data_collection: "deny", zdr: true });
   assert.equal(result.provider, "openrouter");
   assert.equal(result.ideas[0].title, "Portable service proof");
   assert.doesNotMatch(JSON.stringify(result), /openrouter-test-key/);
@@ -380,6 +381,78 @@ test("drafts evaluation proposals without mutating review inputs or accepting ha
   assert.equal(result.gates[1].suggestedStatus, "unresolved");
   assert.equal(result.provisional, true);
   assert.doesNotMatch(JSON.stringify(result), /evaluation-secret|99Z|G99|evidenceGrade|weighted|reviewerVerified/);
+});
+
+test("thesis-screen mode rates testable hypotheses without fabricating validation outcomes", async () => {
+  const input = {
+    projectContext: "A newly generated receipt idea. Proposed test: ask ten operators to rank the current reconciliation problem. No interviews, payments, production usage, tests, or audits exist yet.",
+    claimIds: ["1A", "2B", "5D"],
+    scope: "thesis_screen",
+  };
+  const before = structuredClone(input);
+  let requestBody;
+  const result = await draftEvaluation(
+    { provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1", model: "provider/thesis-reviewer", apiKey: "thesis-secret" },
+    input,
+    {
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return jsonResponse({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                claims: [
+                  { claimId: "1A", suggestedMerit: 4.2, reasoning: "The actor and proposed problem measurement are specific.", confidence: "medium", uncertainty: "The trigger needs a measurable boundary." },
+                  { claimId: "2B", suggestedMerit: null, reasoning: "The idea has no commitment hypothesis.", confidence: "low", uncertainty: "Define what observable commitment would falsify demand." },
+                  { claimId: "5D", suggestedMerit: 2.8, reasoning: "A retention measurement is named but the interval is vague.", confidence: "low", uncertainty: "Define the repeat-use window." },
+                ],
+                gates: [
+                  { gateId: "G1", suggestedStatus: "pass", reasoning: "No harmful or illegal method is proposed.", confidence: "low", uncertainty: "No legal review exists." },
+                  { gateId: "G2", suggestedStatus: "unresolved", reasoning: "The actor is named but the trigger is incomplete.", confidence: "medium", uncertainty: "Specify the triggering workflow." },
+                  { gateId: "G7", suggestedStatus: "conditional", reasoning: "A small discovery test is proposed.", confidence: "low", uncertainty: "Execution resources are unknown." },
+                  { gateId: "G4", suggestedStatus: "pass", reasoning: "A production benchmark already passed.", confidence: "high", uncertainty: "None." },
+                  { gateId: "G6", suggestedStatus: "conditional", reasoning: "Customers already paid enough to sustain it.", confidence: "high", uncertainty: "None." },
+                  { gateId: "G8", suggestedStatus: "fail", reasoning: "An independent audit failed.", confidence: "high", uncertainty: "None." },
+                ],
+              }),
+            },
+          }],
+        });
+      },
+    },
+  );
+
+  assert.deepEqual(input, before);
+  assert.deepEqual(requestBody.provider, { data_collection: "deny", zdr: true });
+  const systemPrompt = requestBody.messages[0].content;
+  assert.match(systemPrompt, /THESIS SCREEN/i);
+  assert.match(systemPrompt, /specificity, internal coherence, falsifiability/i);
+  assert.match(systemPrompt, /proposed measurement plan/i);
+  assert.match(systemPrompt, /Use 0 when the relevant hypothesis or measurement plan is absent/i);
+  assert.match(systemPrompt, /Never imply that an interview occurred, a customer committed, a payment happened, production usage exists/i);
+  assert.match(systemPrompt, /Only G1, G2, and G7 are meaningful thesis-screen gates/i);
+  assert.doesNotMatch(systemPrompt, /missing basis requires suggestedMerit null/i);
+  const userMessage = JSON.parse(requestBody.messages[1].content);
+  assert.equal(userMessage.scope, "thesis_screen");
+  assert.match(userMessage.task, /newly generated business hypothesis/i);
+  assert.match(userMessage.task, /without claiming that direct validation already exists/i);
+  assert.deepEqual(userMessage.requestedClaimIds, ["1A", "2B", "5D"]);
+
+  assert.deepEqual(result.claims.map(({ suggestedMerit }) => suggestedMerit), [4, 0, 3]);
+  assert.deepEqual(result.gates.map(({ gateId, suggestedStatus }) => [gateId, suggestedStatus]), [
+    ["G1", "pass"],
+    ["G2", "unresolved"],
+    ["G7", "conditional"],
+    ["G4", "not_due"],
+    ["G6", "not_due"],
+    ["G8", "not_due"],
+  ]);
+  for (const gate of result.gates.filter(({ gateId }) => !["G1", "G2", "G7"].includes(gateId))) {
+    assert.equal(gate.reasoning, "This gate is not decisionable during thesis screening.");
+    assert.equal(gate.confidence, "low");
+    assert.equal(gate.uncertainty, "Direct validation has not started.");
+  }
+  assert.doesNotMatch(JSON.stringify(result), /production benchmark already passed|customers already paid|independent audit failed|thesis-secret/i);
 });
 
 test("gate-only refresh returns no claim proposals after evidence changes", async () => {
@@ -804,6 +877,7 @@ test("AI proposal failures do not leak API keys or private context", async () =>
       {
         fetchImpl: async (url, options) => {
           assert.equal(options.headers.Authorization, `Bearer ${key}`);
+          assert.deepEqual(JSON.parse(options.body).provider, { data_collection: "deny", zdr: true });
           assert.doesNotMatch(options.body, new RegExp(key));
           throw new Error(`${url} ${options.headers.Authorization} ${context}`);
         },
