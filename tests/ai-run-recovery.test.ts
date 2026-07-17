@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyAiRunFailure } from "../app/lib/ai-run-recovery.ts";
+import {
+  classifyAiRunFailure,
+  createStandardGenerationFailure,
+} from "../app/lib/ai-run-recovery.ts";
 
 test("classifies account failures without allowing another billable request", () => {
   const authentication = classifyAiRunFailure({ code: "authentication_failed", message: "HTTP 401" }, "openrouter");
@@ -38,7 +41,41 @@ test("allows the standard generator to recover from Idea Forge schema failures",
     const result = classifyAiRunFailure(failure);
     assert.equal(result.category, "idea_forge_schema");
     assert.equal(result.allowIdeaForgeFallback, true);
-    assert.match(result.userMessage, /standard idea generation/);
+    assert.match(result.userMessage, /Idea Forge/);
+  }
+});
+
+test("reports a failed standard fallback as standard generation, not Idea Forge", () => {
+  const requestFailure = classifyAiRunFailure(createStandardGenerationFailure(
+    "request",
+    new Error("The model returned an invalid idea format."),
+  ));
+  assert.deepEqual(requestFailure, {
+    category: "standard_generation",
+    userMessage: "SIFT's standard idea generator could not return a usable idea set. Try again or choose another model.",
+    allowIdeaForgeFallback: false,
+  });
+
+  const qualityFailure = classifyAiRunFailure(createStandardGenerationFailure(
+    "quality_gate",
+    new Error("The generated slate failed SIFT's local idea-quality contract."),
+  ));
+  assert.equal(qualityFailure.category, "standard_generation");
+  assert.equal(qualityFailure.allowIdeaForgeFallback, false);
+  assert.match(qualityFailure.userMessage, /local quality check/);
+});
+
+test("keeps account errors accurate when the standard fallback request fails", () => {
+  const cases = [
+    ["authentication_failed HTTP 401", "authentication"],
+    ["OpenRouter HTTP 402 credits required", "billing"],
+    ["HTTP 429 rate_limited", "rate_limit"],
+  ] as const;
+
+  for (const [message, category] of cases) {
+    const result = classifyAiRunFailure(createStandardGenerationFailure("request", new Error(message)), "openrouter");
+    assert.equal(result.category, category);
+    assert.equal(result.allowIdeaForgeFallback, false);
   }
 });
 

@@ -419,6 +419,56 @@ test("idea fallback prompt uses a contract-first protocol counterfactual and str
   assert.match(system, /Use Neither yet when a conventional system is the honest answer/i);
 });
 
+test("idea fallback enforces profile-mode personal fit and keeps a valid partial slate", async () => {
+  let requestBody;
+  const validPrivate = completeIdea({
+    title: "Private fit candidate",
+    scores: {
+      personalFit: 72,
+      opportunitySignal: 68,
+      protocolAffordance: 82,
+      experimentability: 88,
+    },
+  });
+  const missingPrivateFit = completeIdea({
+    title: "Missing private fit",
+    scores: {
+      personalFit: null,
+      opportunitySignal: 68,
+      protocolAffordance: 82,
+      experimentability: 88,
+    },
+  });
+  const result = await generateIdeas(
+    { provider: "openaiCompatible", baseUrl: "https://models.example/v1", model: "model-a" },
+    "Generate two ideas from a private preference profile.",
+    2,
+    {
+      profileMode: "private",
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return jsonResponse({ choices: [{ message: { content: JSON.stringify({ ideas: [validPrivate, missingPrivateFit] }) } }] });
+      },
+    },
+  );
+  assert.equal(result.ideas.length, 1);
+  assert.equal(result.ideas[0].title, "Private fit candidate");
+  assert.match(requestBody.messages[0].content, /personalFit must be a numeric 0-100 estimate/i);
+
+  await assert.rejects(
+    generateIdeas(
+      { provider: "openaiCompatible", baseUrl: "https://models.example/v1", model: "model-a" },
+      "Generate one neutral idea.",
+      1,
+      {
+        profileMode: "neutral",
+        fetchImpl: async () => jsonResponse({ choices: [{ message: { content: JSON.stringify({ ideas: [validPrivate] }) } }] }),
+      },
+    ),
+    /did not return any complete ideas/i,
+  );
+});
+
 test("idea normalization fails closed when exploration estimates or the experiment contract are missing", () => {
   assert.throws(
     () => normalizeGeneratedIdea(completeIdea({ scores: { personalFit: null } })),
@@ -939,7 +989,7 @@ test("AI proposal failures do not leak API keys or private context", async () =>
   );
 });
 
-test("rejects malformed, incomplete, and oversized model output", async () => {
+test("rejects malformed and incomplete output but keeps valid partial slates", async () => {
   const config = { provider: "ollama", baseUrl: "http://localhost:11434", model: "local" };
   await assert.rejects(
     generateIdeas(config, "prompt", 1, { fetchImpl: async () => jsonResponse({ message: { content: "not json" } }) }),
@@ -950,10 +1000,13 @@ test("rejects malformed, incomplete, and oversized model output", async () => {
     listModels(config, { fetchImpl: async () => new Response("{}", { status: 200, headers: { "content-length": "9000000" } }) }),
     /too large/,
   );
-  await assert.rejects(
-    generateIdeas(config, "prompt", 2, { fetchImpl: async () => jsonResponse({ message: { content: JSON.stringify({ ideas: [completeIdea()] }) } }) }),
-    /2 were requested/,
+  const partial = await generateIdeas(
+    config,
+    "prompt",
+    2,
+    { fetchImpl: async () => jsonResponse({ message: { content: JSON.stringify({ ideas: [completeIdea()] }) } }) },
   );
+  assert.equal(partial.ideas.length, 1);
 });
 
 test("sanitizes HTTP and network failures", async () => {

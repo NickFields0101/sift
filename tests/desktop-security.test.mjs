@@ -50,8 +50,14 @@ test("Idea Forge failures recover through one bounded standard-generation path",
   const generation = page.slice(start, end);
 
   assert.match(generation, /const runDesktopFallback = async/);
+  assert.match(generation, /profileMode: snapshot\.profile\.mode/);
+  assert.match(generation, /createStandardGenerationFailure\("request", error\)/);
+  assert.match(generation, /createStandardGenerationFailure\("quality_gate", error\)/);
   assert.match(generation, /classifyAiRunFailure\(forge, connection\.saved\.provider\)/);
   assert.match(generation, /if \(!recovery\.allowIdeaForgeFallback\) throw new Error\(recovery\.userMessage\)/);
+  assert.match(generation, /SIFT is trying its standard idea generator now/);
+  assert.doesNotMatch(generation, /Continuing automatically/);
+  assert.match(generation, /if \(options\.isCancelled\?\.\(\)\) return;[^]*options\.onProgress\?\.\(progress\.message, progress\.percent\)/);
   assert.match(generation, /sourceDetails = \{ engine: "desktop_single_pass", pipelineVersion: "idea-fallback\/1\.1\.0" \}/);
   assert.equal((generation.match(/connection\.bridge\.llm\.generateIdeas\(/g) ?? []).length, 1, "all recovery branches share one bounded fallback helper");
 });
@@ -126,7 +132,10 @@ test("Create to Build separates a fresh thesis decision from venture validation 
   const oneShot = page.slice(start, end);
 
   assert.match(oneShot, /setQuickRunMode\("one-shot"\)/);
+  assert.match(oneShot, /if \(!connection \|\| runId !== quickRunRequestRef\.current\) \{[^]*setQuickRunPhase\("idle"\)[^]*setQuickRunMode\(null\)[^]*setQuickRunMessage\(""\)/);
   assert.match(oneShot, /generateQualitySlate\(connection, stateAtStart, 4/);
+  assert.match(oneShot, /onProgress: \(message, percent\) => \{[^]*if \(runId !== quickRunRequestRef\.current\) return;[^]*setQuickRunMessage/);
+  assert.match(oneShot, /setQuickRunMessage\("Ideas generated\. Comparing the strongest candidates\."\)/);
   assert.match(page, /runIdeaForgeIntelligence\(/);
   assert.match(page, /selectQualitySlate\(/);
   assert.match(page, /engine: "python_multistage"/);

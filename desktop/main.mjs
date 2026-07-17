@@ -245,7 +245,7 @@ function registerIpc() {
     const prompt = typeof input?.prompt === "string" ? input.prompt : "";
     const count = input?.count;
     const config = await resolvedConfig(input);
-    return generateIdeas(config, prompt, count);
+    return generateIdeas(config, prompt, count, { profileMode: input?.profileMode });
   }));
   ipcMain.handle(CHANNELS.draftEvaluation, safeHandler(async (input = {}) => {
     const config = await resolvedConfig(input);

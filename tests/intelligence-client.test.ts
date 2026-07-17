@@ -110,6 +110,11 @@ function ideaForgeResult() {
       candidatesReturned: 1,
       method: "frame-diverge-critique",
     },
+    usage: {
+      modelCalls: 3,
+      steps: 8,
+      elapsedMs: 1_240,
+    },
   };
 }
 
@@ -245,6 +250,37 @@ test("Idea Forge streams progress and returns only an exact hypothesis-only idea
   assert.equal(outcome.result.ideas[0]?.experimentPlan.method, "concierge");
   assert.equal(outcome.result.ideas[0]?.scores.protocolAffordance, 35);
   assert.equal(outcome.result.diagnostics.candidatesReturned, outcome.result.ideas.length);
+  assert.deepEqual(outcome.result.usage, { modelCalls: 3, steps: 8, elapsedMs: 1_240 });
+});
+
+test("Idea Forge rejects malformed worker usage and a null private-profile fit", async () => {
+  const runWith = async (result: unknown) => {
+    installBridge({
+      getStatus: async () => ({ available: true }),
+      start: async () => ({ runId: "forge-contract" }),
+      cancel: async () => ({ cancelled: true }),
+      getEvents: async () => ({ status: "completed", events: [], result }),
+    });
+    return runIdeaForgeIntelligence(ideaForgeInputFixture());
+  };
+
+  const malformedUsage = await runWith({
+    ...ideaForgeResult(),
+    usage: { modelCalls: 3, steps: "8", elapsedMs: 1_240 },
+  });
+  assert.equal(malformedUsage.kind, "failed");
+  assert.match(malformedUsage.message, /schema validation/i);
+
+  const privateNullFit = ideaForgeResult();
+  const rejectedPrivateFit = await runWith({
+    ...privateNullFit,
+    ideas: privateNullFit.ideas.map((idea) => ({
+      ...idea,
+      scores: { ...idea.scores, personalFit: null },
+    })),
+  });
+  assert.equal(rejectedPrivateFit.kind, "failed");
+  assert.match(rejectedPrivateFit.message, /schema validation/i);
 });
 
 test("Idea Forge rejects fabricated envelopes, malformed ideas, and invalid local briefs", async () => {

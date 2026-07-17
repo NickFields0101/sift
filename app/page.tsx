@@ -36,7 +36,7 @@ import {
 } from "./lib/scoring";
 import { searchLlmModels } from "./lib/model-search";
 import { applyEvaluationProposals, applyEvidenceProposals, sourceContentSha256 } from "./lib/ai-assistance";
-import { classifyAiRunFailure } from "./lib/ai-run-recovery";
+import { classifyAiRunFailure, createStandardGenerationFailure } from "./lib/ai-run-recovery";
 import { createBuildHandoff, type BuildHandoff } from "./lib/build-handoff";
 import { buildQuickRunPreview, type QuickRunPreview } from "./lib/quick-run";
 import {
@@ -2092,16 +2092,22 @@ export default function Home() {
     }
 
     const runDesktopFallback = async (progressMessage: string) => {
+      if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
       options.onProgress?.(progressMessage);
       const generationPrompt = (options.promptOverride ?? generationPromptFor(snapshot.profile, snapshot.project.domain))
         .replace("Generate 8 diverse candidates", `Generate ${requestedCount} diverse candidates`);
-      return connection.bridge.llm.generateIdeas({
-        prompt: generationPrompt,
-        count: requestedCount,
-        provider: connection.saved.provider,
-        baseUrl: connection.saved.baseUrl,
-        model: connection.saved.model,
-      });
+      try {
+        return await connection.bridge.llm.generateIdeas({
+          prompt: generationPrompt,
+          count: requestedCount,
+          profileMode: snapshot.profile.mode,
+          provider: connection.saved.provider,
+          baseUrl: connection.saved.baseUrl,
+          model: connection.saved.model,
+        });
+      } catch (error) {
+        throw createStandardGenerationFailure("request", error);
+      }
     };
 
     const forge = await runIdeaForgeIntelligence({
@@ -2114,7 +2120,10 @@ export default function Home() {
       limits: { timeoutMs: 180_000 },
     }, {
       isCancelled: options.isCancelled,
-      onProgress: (progress) => options.onProgress?.(progress.message, progress.percent),
+      onProgress: (progress) => {
+        if (options.isCancelled?.()) return;
+        options.onProgress?.(progress.message, progress.percent);
+      },
     });
 
     let result: GeneratedIdeasResult;
@@ -2123,50 +2132,65 @@ export default function Home() {
       result = { ideas: forge.result.ideas, provider: connection.saved.provider, model: connection.saved.model };
       sourceDetails = { engine: "python_multistage", pipelineVersion: forge.result.pipelineVersion };
     } else if (forge.kind === "unavailable") {
-      result = await runDesktopFallback("The multi-stage engine is unavailable. Continuing with SIFT's standard idea generator.");
+      result = await runDesktopFallback("Idea Forge is unavailable. SIFT is trying its standard idea generator now.");
       sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.1.0" };
     } else {
       const recovery = classifyAiRunFailure(forge, connection.saved.provider);
       if (!recovery.allowIdeaForgeFallback) throw new Error(recovery.userMessage);
       result = await runDesktopFallback(recovery.category === "timeout"
-        ? "Idea Forge timed out. Continuing automatically with SIFT's standard generator."
-        : `${recovery.userMessage} Continuing automatically now.`);
+        ? "Idea Forge timed out. SIFT is trying its standard idea generator now."
+        : `${recovery.userMessage} SIFT is trying its standard idea generator now.`);
       sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.1.0" };
     }
 
     if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
-    let candidates = generatedCandidatesFromResult(
-      result,
-      snapshot.profile.mode === "private",
-      sourceDetails,
-    );
-    let qualitySlate = selectQualitySlate(
-      candidates,
-      requestedCount,
-      (candidate) => calculateGenerationPriority(snapshot.profile, candidate.scores),
-    );
-    let selected = qualitySlate.selected.map(({ candidate }) => candidate);
-    if (selected.length === 0 && sourceDetails.engine === "python_multistage") {
-      result = await runDesktopFallback("The multi-stage ideas did not pass SIFT's local quality gate. Continuing with the standard generator.");
-      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.1.0" };
-      if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
-      candidates = generatedCandidatesFromResult(
+    const assessGeneratedResult = () => {
+      const candidates = generatedCandidatesFromResult(
         result,
         snapshot.profile.mode === "private",
         sourceDetails,
       );
-      qualitySlate = selectQualitySlate(
+      const qualitySlate = selectQualitySlate(
         candidates,
         requestedCount,
         (candidate) => calculateGenerationPriority(snapshot.profile, candidate.scores),
       );
-      selected = qualitySlate.selected.map(({ candidate }) => candidate);
+      return {
+        qualitySlate,
+        selected: qualitySlate.selected.map(({ candidate }) => candidate),
+      };
+    };
+    const assessStandardResult = () => {
+      try {
+        return assessGeneratedResult();
+      } catch (error) {
+        throw createStandardGenerationFailure("quality_gate", error);
+      }
+    };
+
+    let assessed: ReturnType<typeof assessGeneratedResult>;
+    try {
+      assessed = sourceDetails.engine === "desktop_single_pass"
+        ? assessStandardResult()
+        : assessGeneratedResult();
+    } catch (error) {
+      if (sourceDetails.engine === "desktop_single_pass") throw error;
+      result = await runDesktopFallback("Idea Forge's ideas could not pass SIFT's local quality check. SIFT is trying its standard idea generator now.");
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.1.0" };
+      assessed = assessStandardResult();
+    }
+    let { qualitySlate, selected } = assessed;
+    if (selected.length === 0 && sourceDetails.engine === "python_multistage") {
+      result = await runDesktopFallback("Idea Forge's ideas did not pass SIFT's local quality check. SIFT is trying its standard idea generator now.");
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.1.0" };
+      if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
+      ({ qualitySlate, selected } = assessStandardResult());
     }
     if (selected.length === 0) {
       const firstIssue = qualitySlate.rejected.flatMap(({ report }) => report.blockers)[0]?.message;
-      throw new Error(firstIssue
+      throw createStandardGenerationFailure("quality_gate", new Error(firstIssue
         ? `The generated slate failed SIFT's local idea-quality contract: ${firstIssue}`
-        : "The generated slate was too vague or duplicated to pass SIFT's local idea-quality contract.");
+        : "The generated slate was too vague or duplicated to pass SIFT's local idea-quality contract."));
     }
     return { candidates: selected, result, partial: qualitySlate.partial, sourceDetails };
   }
@@ -2364,14 +2388,25 @@ export default function Home() {
 
     try {
       const connection = await saveAiConnectionOrOpenSettings();
-      if (!connection || runId !== quickRunRequestRef.current) return;
+      if (!connection || runId !== quickRunRequestRef.current) {
+        if (runId === quickRunRequestRef.current) {
+          setQuickRunPhase("idle");
+          setQuickRunMode(null);
+          setQuickRunMessage("");
+        }
+        return;
+      }
 
       const slate = await generateQualitySlate(connection, stateAtStart, 4, {
         promptOverride: generationPromptBase,
         isCancelled: () => runId !== quickRunRequestRef.current,
-        onProgress: (message, percent) => setQuickRunMessage(`${message}${typeof percent === "number" ? ` (${Math.round(percent)}%)` : ""}`),
+        onProgress: (message, percent) => {
+          if (runId !== quickRunRequestRef.current) return;
+          setQuickRunMessage(`${message}${typeof percent === "number" ? ` (${Math.round(percent)}%)` : ""}`);
+        },
       });
       if (runId !== quickRunRequestRef.current) return;
+      setQuickRunMessage("Ideas generated. Comparing the strongest candidates.");
       const generatedCandidates = slate.candidates;
       setLastGeneration({
         provider: slate.result.provider,

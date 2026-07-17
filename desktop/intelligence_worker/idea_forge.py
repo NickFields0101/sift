@@ -55,23 +55,91 @@ _INVENTED_EVIDENCE_PATTERNS = tuple(
 )
 
 
+def _balanced_json_objects(text: str) -> tuple[list[str], bool]:
+    """Return complete top-level JSON-object candidates and whether braces were ambiguous."""
+
+    objects: list[str] = []
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+    ambiguous = False
+
+    for index, character in enumerate(text):
+        if depth == 0:
+            if character == "{":
+                start = index
+                depth = 1
+                in_string = False
+                escaped = False
+            elif character == "}":
+                ambiguous = True
+            continue
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(text[start:index + 1])
+                start = None
+
+    return objects, ambiguous or depth != 0
+
+
 def _parse_json(text: str, stage: str) -> Any:
-    candidate = text.strip()
-    if candidate.startswith("```"):
-        first_newline = candidate.find("\n")
-        last_fence = candidate.rfind("```")
-        if first_newline != -1 and last_fence > first_newline:
-            candidate = candidate[first_newline + 1:last_fence].strip()
+    candidate = text.strip().lstrip("\ufeff").strip()
+
     try:
         return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    fence_positions = [match.start() for match in re.finditer(r"```", candidate)]
+    if fence_positions:
+        if len(fence_positions) != 2:
+            raise ProtocolError("invalid_model_output", f"The {stage} pass did not return valid JSON.")
+        opening, closing = fence_positions
+        first_newline = candidate.find("\n", opening + 3, closing)
+        if first_newline == -1:
+            raise ProtocolError("invalid_model_output", f"The {stage} pass did not return valid JSON.")
+        language = candidate[opening + 3:first_newline].strip().casefold()
+        if language not in {"", "json"}:
+            raise ProtocolError("invalid_model_output", f"The {stage} pass did not return valid JSON.")
+        outside = candidate[:opening] + candidate[closing + 3:]
+        outside_objects, outside_ambiguous = _balanced_json_objects(outside)
+        if outside_objects or outside_ambiguous:
+            raise ProtocolError("invalid_model_output", f"The {stage} pass returned ambiguous JSON.")
+        fenced = candidate[first_newline + 1:closing].strip()
+        try:
+            return json.loads(fenced)
+        except json.JSONDecodeError:
+            raise ProtocolError("invalid_model_output", f"The {stage} pass did not return valid JSON.") from None
+
+    objects, ambiguous = _balanced_json_objects(candidate)
+    if ambiguous or len(objects) != 1:
+        raise ProtocolError("invalid_model_output", f"The {stage} pass returned ambiguous JSON.")
+    try:
+        return json.loads(objects[0])
     except json.JSONDecodeError:
         raise ProtocolError("invalid_model_output", f"The {stage} pass did not return valid JSON.") from None
 
 
 def _record(value: Any, keys: set[str], name: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != keys:
+    if not isinstance(value, dict) or not keys.issubset(value):
         raise ProtocolError("invalid_model_output", f"The model returned an invalid {name} structure.")
-    return value
+    return {key: value[key] for key in keys}
 
 
 def _text(value: Any, name: str, maximum: int = 1_500) -> str:
@@ -334,6 +402,8 @@ def validate_final_ideas(value: Any, requested_count: int, profile_mode: str) ->
         }
         if profile_mode == "neutral" and idea["scores"]["personalFit"] is not None:
             raise ProtocolError("invalid_model_output", "Neutral generation must not infer a personal-fit score.")
+        if profile_mode == "private" and idea["scores"]["personalFit"] is None:
+            raise ProtocolError("invalid_model_output", "Private-profile generation requires a personal-fit score.")
         if not any(term in idea["whyNow"].casefold() for term in ("hypothesis", "if ", "unknown", "to test", "may", "could", "might")):
             raise ProtocolError("invalid_model_output", "whyNow must remain explicitly hypothetical.")
         _assert_protocol_consistency(idea)
@@ -355,7 +425,8 @@ def _profile_instruction(profile: dict[str, Any]) -> str:
         return "Generate neutrally. Do not infer personal fit; personalFit must be null."
     return (
         "Use the private preference profile only to diversify search and estimate personal fit. "
-        "Do not infer diagnoses, protected traits, or raw personality scores."
+        "Do not infer diagnoses, protected traits, or raw personality scores. "
+        "personalFit must be a numeric score from 0 through 100."
     )
 
 
@@ -365,6 +436,7 @@ def run_idea_forge(
 ) -> dict[str, Any]:
     requested_count = request.input["requestedCount"]
     profile_mode = request.input["profile"]["mode"]
+    personal_fit_example = "null" if profile_mode == "neutral" else "50"
     frame_count = min(12, max(8, requested_count))
     raw_count = min(36, max(requested_count * 3, requested_count + 4))
     input_json = json.dumps(request.input, ensure_ascii=False, separators=(",", ":"))
@@ -443,7 +515,7 @@ Return exactly {requested_count} ideas as JSON only, with no extra keys, using t
 "target":"string","sampleSize":null,"artifact":"string","metric":"string",
 "passThreshold":"string","killThreshold":"string"}},
 "route":"Xahau|Evernode|Both|Neither yet",
-"scores":{{"personalFit":null,"opportunitySignal":0,"protocolAffordance":0,"experimentability":0}}
+"scores":{{"personalFit":{personal_fit_example},"opportunitySignal":0,"protocolAffordance":0,"experimentability":0}}
 }}]}}"""
     final_text = call_stage(
         "critiquing",

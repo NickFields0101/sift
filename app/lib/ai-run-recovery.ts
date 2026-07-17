@@ -4,6 +4,7 @@ export type AiRunFailureCategory =
   | "rate_limit"
   | "timeout"
   | "idea_forge_schema"
+  | "standard_generation"
   | "worker_protocol"
   | "worker_stopped"
   | "worker_internal"
@@ -15,6 +16,24 @@ export interface AiRunRecovery {
   category: AiRunFailureCategory;
   userMessage: string;
   allowIdeaForgeFallback: boolean;
+}
+
+export type StandardGenerationFailureStage = "request" | "quality_gate";
+
+/**
+ * Preserve the underlying provider signal for local classification while
+ * marking failures that occurred after SIFT switched to its standard
+ * generator. The fixed marker prevents a malformed fallback response from
+ * being reported as another Idea Forge failure.
+ */
+export function createStandardGenerationFailure(
+  stage: StandardGenerationFailureStage,
+  cause?: unknown,
+): Error {
+  const error = new Error(`standard_generation_${stage}`);
+  error.name = "StandardGenerationFailure";
+  (error as Error & { cause?: unknown }).cause = cause;
+  return error;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -94,6 +113,14 @@ export function classifyAiRunFailure(value: unknown, provider?: string): AiRunRe
   if (/\b(?:cancelled|canceled|app_closing)\b/.test(signal)) {
     return recovery("cancelled", "The AI run was cancelled. Start it again when you are ready.");
   }
+  if (/\bstandardgenerationfailure\b|\bstandard_generation_(?:request|quality_gate)\b/.test(signal)) {
+    return recovery(
+      "standard_generation",
+      /\bstandard_generation_quality_gate\b/.test(signal)
+        ? "SIFT's standard idea generator returned ideas that did not pass the local quality check. Try a different model or make the opportunity boundary more specific."
+        : "SIFT's standard idea generator could not return a usable idea set. Try again or choose another model.",
+    );
+  }
   if (/\b(?:timeout|timed out|worker_timeout)\b|took too long|time limit|time budget/.test(signal)) {
     return recovery(
       "timeout",
@@ -104,28 +131,28 @@ export function classifyAiRunFailure(value: unknown, provider?: string): AiRunRe
   if (/\b(?:worker_protocol|incompatible_protocol)\b|protocol violation|incompatible response|returned invalid data/.test(signal)) {
     return recovery(
       "worker_protocol",
-      "The local intelligence engine returned an incompatible response. SIFT can safely continue with standard idea generation.",
+      "The local intelligence engine returned an incompatible response.",
       true,
     );
   }
   if (/\b(?:worker_stopped|worker_unavailable|worker_write|run_not_found|capability_unavailable)\b|engine stopped unexpectedly|engine is unavailable|engine is not installed|could not be started|did not become ready|missing run identifier/.test(signal)) {
     return recovery(
       "worker_stopped",
-      "The local intelligence engine stopped unexpectedly. SIFT can safely continue with standard idea generation.",
+      "The local intelligence engine stopped unexpectedly.",
       true,
     );
   }
   if (/\b(?:invalid_model_output|invalid_result|schema_validation|output_too_large)\b|schema validation|invalid idea format|result failed sift's local schema|slate failed sift's local idea-quality contract|unsupported response|empty response|did not return valid json|model returned an invalid|model must return exactly|duplicate (?:opportunity frames|raw candidates)|referenced an unknown opportunity frame|final idea set contains duplicate/.test(signal)) {
     return recovery(
       "idea_forge_schema",
-      "Idea Forge returned an invalid idea format. SIFT can safely continue with standard idea generation.",
+      "Idea Forge returned an invalid idea format.",
       true,
     );
   }
   if (/\b(?:internal_error|worker_error|budget_exceeded)\b|intelligence worker could not complete|idea forge (?:engine )?(?:could not complete|failed)/.test(signal)) {
     return recovery(
       "worker_internal",
-      "The local Idea Forge engine could not complete this pass. SIFT can safely continue with standard idea generation.",
+      "The local Idea Forge engine could not complete this pass.",
       true,
     );
   }

@@ -150,6 +150,12 @@ export interface IdeaForgeIdea {
   scores: IdeaForgeScores;
 }
 
+export interface IdeaForgeUsage {
+  modelCalls: number;
+  steps: number;
+  elapsedMs: number;
+}
+
 export interface IdeaForgeResult {
   task: "idea_forge";
   provisional: true;
@@ -163,6 +169,7 @@ export interface IdeaForgeResult {
     candidatesReturned: number;
     method: "frame-diverge-critique";
   };
+  usage: IdeaForgeUsage;
 }
 
 export interface IntelligenceProgress {
@@ -466,6 +473,7 @@ function normalizeIdeaForgeResult(
     "pipelineVersion",
     "ideas",
     "diagnostics",
+    "usage",
   ]);
   const diagnostics = exactRecord(input?.diagnostics, [
     "framesGenerated",
@@ -473,6 +481,7 @@ function normalizeIdeaForgeResult(
     "candidatesReturned",
     "method",
   ]);
+  const usage = exactRecord(input?.usage, ["modelCalls", "steps", "elapsedMs"]);
   if (input?.task !== "idea_forge"
     || input.provisional !== true
     || input.evidenceKind !== "hypothesis"
@@ -481,17 +490,24 @@ function normalizeIdeaForgeResult(
     || !Array.isArray(input.ideas)
     || input.ideas.length !== expected.requestedCount
     || !diagnostics
+    || !usage
     || diagnostics.method !== "frame-diverge-critique") return null;
 
   const ideas = input.ideas.map(normalizeIdeaForgeIdea);
   if (ideas.some((idea) => !idea)) return null;
   const normalizedIdeas = ideas as IdeaForgeIdea[];
   if (expected.profileMode === "neutral" && normalizedIdeas.some((idea) => idea.scores.personalFit !== null)) return null;
+  if (expected.profileMode === "private" && normalizedIdeas.some((idea) => idea.scores.personalFit === null)) return null;
   const titles = normalizedIdeas.map((idea) => idea.title.toLocaleLowerCase("en-US"));
   if (new Set(titles).size !== titles.length) return null;
   const counts = [diagnostics.framesGenerated, diagnostics.rawCandidatesGenerated, diagnostics.candidatesReturned];
   if (counts.some((count) => !Number.isSafeInteger(count) || Number(count) < 0)
     || diagnostics.candidatesReturned !== ideas.length) return null;
+  const usageCounts = [usage.modelCalls, usage.steps, usage.elapsedMs];
+  if (usageCounts.some((count) => !Number.isSafeInteger(count) || Number(count) < 0)
+    || Number(usage.modelCalls) > 3
+    || Number(usage.steps) > 16
+    || Number(usage.elapsedMs) > 180_000) return null;
 
   return {
     task: "idea_forge",
@@ -505,6 +521,11 @@ function normalizeIdeaForgeResult(
       rawCandidatesGenerated: Number(diagnostics.rawCandidatesGenerated),
       candidatesReturned: Number(diagnostics.candidatesReturned),
       method: "frame-diverge-critique",
+    },
+    usage: {
+      modelCalls: Number(usage.modelCalls),
+      steps: Number(usage.steps),
+      elapsedMs: Number(usage.elapsedMs),
     },
   };
 }
