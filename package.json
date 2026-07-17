@@ -1,6 +1,6 @@
 {
   "name": "xahau-evernode-sift",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "SIFT: local-first deterministic idea generation and evidence validation for Xahau and Evernode.",
   "author": "Nick Fields",
   "homepage": "https://github.com/NickFields0101/sift#readme",
@@ -22,7 +22,7 @@
     "start": "vinext start",
     "preview": "node scripts/preview-local.mjs",
     "pretest": "vinext build",
-    "test": "node --test tests/scoring.test.ts tests/ai-assistance.test.ts tests/research-run.test.ts tests/quick-run.test.ts tests/idea-quality.test.ts tests/model-search.test.ts tests/personality.test.ts tests/storage-migration.test.ts tests/intelligence-client.test.ts tests/intelligence-bridge.test.mjs tests/llm-core.test.mjs tests/build-tools.test.mjs tests/desktop-security.test.mjs tests/rendered-html.test.mjs desktop/intelligence-bridge.test.mjs",
+    "test": "node --test tests/scoring.test.ts tests/ai-assistance.test.ts tests/ai-run-recovery.test.ts tests/build-handoff.test.ts tests/research-run.test.ts tests/quick-run.test.ts tests/idea-quality.test.ts tests/model-search.test.ts tests/personality.test.ts tests/storage-migration.test.ts tests/intelligence-client.test.ts tests/intelligence-bridge.test.mjs tests/llm-core.test.mjs tests/build-tools.test.mjs tests/desktop-security.test.mjs tests/rendered-html.test.mjs desktop/intelligence-bridge.test.mjs",
     "intelligence:test": "python -m unittest discover -s desktop/intelligence_worker/tests -p \"test_*.py\"",
     "intelligence:build": "python scripts/build-intelligence-worker.py",
     "intelligence:smoke": "node scripts/smoke-intelligence-worker.mjs",

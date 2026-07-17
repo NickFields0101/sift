@@ -965,6 +965,11 @@ input[type="range"] { accent-color: var(--green); }
 .build-handoff-strip .eyebrow { margin-bottom: 2px; }
 .build-handoff-strip strong { font-size: 13px; }
 .build-handoff-strip span { color: var(--ink-soft); font-size: 10px; }
+.build-ready-handoff { background: var(--green-pale); border-color: color-mix(in srgb, var(--green-bright) 48%, var(--line)); }
+.build-ready-handoff > div:last-child { align-items: flex-end; min-width: 190px; text-align: right; }
+.build-ready-handoff > div:last-child > span { font-family: var(--mono); font-size: 8px; text-transform: uppercase; }
+.build-ready-handoff > div:last-child > strong { color: var(--accent-text); }
+.build-ready-handoff > div:last-child > small { color: var(--ink-soft); font-family: var(--mono); font-size: 8px; }
 
 /* Build */
 .build-page { max-width: 1380px; }
@@ -1408,6 +1413,7 @@ input[type="range"] { accent-color: var(--green); }
   .result-hero { align-items: flex-start; flex-direction: column; }
   .build-handoff-strip { align-items: stretch; flex-direction: column; }
   .build-handoff-strip .button { width: 100%; }
+  .build-ready-handoff > div:last-child { align-items: flex-start; min-width: 0; text-align: left; }
   .build-empty { grid-template-columns: 1fr; padding: 24px 20px; text-align: center; }
   .build-empty img { height: 110px; justify-self: center; width: 110px; }
   .build-hero { grid-template-columns: 1fr; padding: 22px 19px; }

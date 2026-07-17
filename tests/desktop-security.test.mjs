@@ -42,6 +42,20 @@ test("AI generation cannot write deterministic review inputs", async () => {
   assert.doesNotMatch(generationFunction, /updateReview|updateClaim|updateGate|artifacts|gates|claims/);
 });
 
+test("Idea Forge failures recover through one bounded standard-generation path", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const start = page.indexOf("async function generateQualitySlate");
+  const end = page.indexOf("async function generateWithConnectedLlm", start);
+  assert.ok(start >= 0 && end > start);
+  const generation = page.slice(start, end);
+
+  assert.match(generation, /const runDesktopFallback = async/);
+  assert.match(generation, /classifyAiRunFailure\(forge, connection\.saved\.provider\)/);
+  assert.match(generation, /if \(!recovery\.allowIdeaForgeFallback\) throw new Error\(recovery\.userMessage\)/);
+  assert.match(generation, /sourceDetails = \{ engine: "desktop_single_pass", pipelineVersion: "idea-fallback\/1\.1\.0" \}/);
+  assert.equal((generation.match(/connection\.bridge\.llm\.generateIdeas\(/g) ?? []).length, 1, "all recovery branches share one bounded fallback helper");
+});
+
 test("selecting a different idea cannot inherit the prior idea's review or evidence", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const freshStart = page.indexOf("function freshIdeaScreenReview");
@@ -104,7 +118,7 @@ test("AI one-click Quick Run calculates only an isolated preview", async () => {
   assert.match(page, /Saved evidence/);
 });
 
-test("Generate & Screen separates a fresh thesis decision from venture validation", async () => {
+test("Create to Build separates a fresh thesis decision from venture validation and requires build consent", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const start = page.indexOf("async function startOneShotRun");
   const end = page.indexOf("async function startResearchRun", start);
@@ -121,6 +135,7 @@ test("Generate & Screen separates a fresh thesis decision from venture validatio
   assert.match(oneShot, /freshIdeaScreenReview\(\)/);
   assert.match(oneShot, /scope: "thesis_screen"/);
   assert.match(oneShot, /screenThesis\(finalPreview\.previewReview\)/);
+  assert.match(oneShot, /createBuildHandoff\(\{ route: chosenIdea\.route, decision: thesisScreen\.decision \}\)/);
   assert.match(oneShot, /contextResult \? publicContextSummaryFor\(contextResult\) : ""/);
   assert.match(oneShot, /const finalPreview = await draftEvaluationFor/);
   assert.match(oneShot, /review: finalReview/);
@@ -136,7 +151,13 @@ test("Generate & Screen separates a fresh thesis decision from venture validatio
   assert.match(oneShot, /ideas: stateAtCommit\.ideas/);
   assert.doesNotMatch(oneShot, /selectedAtStart|completeAutomatedResearchRun|applyResearchEvidenceBatch|committed: true/);
   assert.doesNotMatch(oneShot, /window\.confirm|reviewerVerified\s*:\s*true|acknowledgedCounterEvidenceIds/);
-  assert.match(page, /Generate → Compare → Research → Recommend/);
+  assert.match(page, /Create → Compare → Research → Decide → Build-ready/);
+  assert.match(page, /Start building/);
+  const inspectStart = page.indexOf("function inspectQuickRunOutcome");
+  const inspectEnd = page.indexOf("async function saveAiConnectionOrOpenSettings", inspectStart);
+  const inspect = page.slice(inspectStart, inspectEnd);
+  assert.match(inspect, /quickRunOutcome\.kind === "one-shot"[^]*setSection\("build"\)/);
+  assert.doesNotMatch(oneShot, /\.build\.run|runBuildAction/);
   assert.match(page, /New ideas start with no customer evidence/);
   assert.match(page, /Validation has not started/);
   assert.match(page, /WORTH TESTING/);

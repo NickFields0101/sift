@@ -174,12 +174,12 @@ export interface IntelligenceProgress {
 export type IntelligenceRunOutcome =
   | { kind: "completed"; result: IntelligenceResult }
   | { kind: "unavailable"; message: string }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string; code?: string };
 
 export type IdeaForgeRunOutcome =
   | { kind: "completed"; result: IdeaForgeResult }
   | { kind: "unavailable"; message: string }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string; code?: string };
 
 interface IntelligenceStatus {
   available: boolean;
@@ -601,6 +601,12 @@ function errorMessage(value: unknown, fallback: string): string {
   return cleanText(input?.message, 1_000) || fallback;
 }
 
+function errorCode(value: unknown): string {
+  const input = record(value);
+  const code = cleanText(input?.code, 64);
+  return /^[a-z0-9_-]{1,64}$/i.test(code) ? code : "";
+}
+
 function getIntelligenceBridge(): IntelligenceBridge | null {
   if (typeof window === "undefined") return null;
   const candidate = record((window.sift as unknown as Record<string, unknown> | undefined)?.intelligence);
@@ -660,7 +666,7 @@ interface IntelligenceRunMessages {
 type GenericIntelligenceRunOutcome<Result> =
   | { kind: "completed"; result: Result }
   | { kind: "unavailable"; message: string }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string; code?: string };
 
 async function runIntelligenceTask<Result>(
   input: IntelligenceRunInput,
@@ -718,7 +724,8 @@ async function runIntelligenceTask<Result>(
           : { kind: "failed", message: messages.invalidResult };
       }
       if (batch.status === "failed") {
-        return { kind: "failed", message: errorMessage(batch.error, messages.failed) };
+        const code = errorCode(batch.error);
+        return { kind: "failed", message: errorMessage(batch.error, messages.failed), ...(code ? { code } : {}) };
       }
       if (batch.status === "cancelled") return { kind: "failed", message: messages.cancelled };
     }
@@ -727,7 +734,8 @@ async function runIntelligenceTask<Result>(
     return { kind: "failed", message: messages.timedOut };
   } catch (error) {
     if (runId) await bridge.cancel({ runId }).catch(() => ({ cancelled: false }));
-    return { kind: "failed", message: errorMessage(error, messages.unexpected) };
+    const code = errorCode(error);
+    return { kind: "failed", message: errorMessage(error, messages.unexpected), ...(code ? { code } : {}) };
   }
 }
 

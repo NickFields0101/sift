@@ -36,6 +36,8 @@ import {
 } from "./lib/scoring";
 import { searchLlmModels } from "./lib/model-search";
 import { applyEvaluationProposals, applyEvidenceProposals, sourceContentSha256 } from "./lib/ai-assistance";
+import { classifyAiRunFailure } from "./lib/ai-run-recovery";
+import { createBuildHandoff, type BuildHandoff } from "./lib/build-handoff";
 import { buildQuickRunPreview, type QuickRunPreview } from "./lib/quick-run";
 import {
   intelligenceContextSummary,
@@ -187,6 +189,7 @@ interface QuickRunOutcomeState {
   kind: "one-shot" | "reviewed-research" | "preview";
   preview: QuickRunPreview;
   idea: IdeaCandidate;
+  buildHandoff?: BuildHandoff;
   thesisScreen?: ThesisScreenOutput;
   contextResearch?: {
     result?: ResearchEvidenceResult;
@@ -465,14 +468,7 @@ const thesisDecisionLabels: Record<ThesisScreenOutput["decision"], string> = {
 };
 
 function friendlyAiError(value: unknown, provider?: LlmProvider) {
-  const message = value instanceof Error ? value.message : String(value || "The AI request could not complete.");
-  if (/\b402\b|credits?|spending limit/i.test(message)) return provider === "openrouter" || /openrouter/i.test(message)
-    ? "OpenRouter needs credits or a higher spending limit. Update your OpenRouter account, then try again."
-    : "The model provider needs credits or a higher spending limit. Update that account, then try again.";
-  if (/\b401\b|unauthori[sz]ed|invalid api key|authentication/i.test(message)) return "The API key was not accepted. Check the key in AI settings, then try again.";
-  if (/\b429\b|rate.?limit|too many requests/i.test(message)) return "The model is receiving too many requests. Wait a moment, then try again.";
-  if (/timed? out|timeout/i.test(message)) return "The model took too long to respond. Try again or choose a faster model.";
-  return "The AI request could not finish. Try again or choose another model.";
+  return classifyAiRunFailure(value, provider).userMessage;
 }
 
 const routeLabels: Record<ProtocolRoute, string> = {
@@ -1549,6 +1545,10 @@ export default function Home() {
     : aiUndo.appliedInputFingerprint === score.inputFingerprint);
   const profileErrors = useMemo(() => validateGenerationProfile(state.profile), [state.profile]);
   const selectedIdea = state.ideas.find((idea) => idea.id === state.project.selectedIdeaId);
+  const currentBuildHandoff = useMemo(() => selectedIdea ? createBuildHandoff({
+    route: selectedIdea.route,
+    decision: state.review.stage === "thesis" ? liveThesisScreen.decision : "advance_to_validation",
+  }) : undefined, [liveThesisScreen.decision, selectedIdea, state.review.stage]);
   const evaluationSnapshot = useMemo(
     () => evaluationFingerprintFor(selectedIdea, state.project, state.review, evaluationNotes),
     [evaluationNotes, selectedIdea, state.project, state.review],
@@ -2091,6 +2091,19 @@ export default function Home() {
       }
     }
 
+    const runDesktopFallback = async (progressMessage: string) => {
+      options.onProgress?.(progressMessage);
+      const generationPrompt = (options.promptOverride ?? generationPromptFor(snapshot.profile, snapshot.project.domain))
+        .replace("Generate 8 diverse candidates", `Generate ${requestedCount} diverse candidates`);
+      return connection.bridge.llm.generateIdeas({
+        prompt: generationPrompt,
+        count: requestedCount,
+        provider: connection.saved.provider,
+        baseUrl: connection.saved.baseUrl,
+        model: connection.saved.model,
+      });
+    };
+
     const forge = await runIdeaForgeIntelligence({
       task: "idea_forge",
       context: {
@@ -2110,33 +2123,45 @@ export default function Home() {
       result = { ideas: forge.result.ideas, provider: connection.saved.provider, model: connection.saved.model };
       sourceDetails = { engine: "python_multistage", pipelineVersion: forge.result.pipelineVersion };
     } else if (forge.kind === "unavailable") {
-      options.onProgress?.("The multi-stage engine is unavailable; running the contract-first desktop fallback.");
-      const generationPrompt = (options.promptOverride ?? generationPromptFor(snapshot.profile, snapshot.project.domain))
-        .replace("Generate 8 diverse candidates", `Generate ${requestedCount} diverse candidates`);
-      result = await connection.bridge.llm.generateIdeas({
-        prompt: generationPrompt,
-        count: requestedCount,
-        provider: connection.saved.provider,
-        baseUrl: connection.saved.baseUrl,
-        model: connection.saved.model,
-      });
-      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.0.0" };
+      result = await runDesktopFallback("The multi-stage engine is unavailable. Continuing with SIFT's standard idea generator.");
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.1.0" };
     } else {
-      throw new Error(`${forge.message} SIFT did not issue a second potentially billable model request.`);
+      const recovery = classifyAiRunFailure(forge, connection.saved.provider);
+      if (!recovery.allowIdeaForgeFallback) throw new Error(recovery.userMessage);
+      result = await runDesktopFallback(recovery.category === "timeout"
+        ? "Idea Forge timed out. Continuing automatically with SIFT's standard generator."
+        : `${recovery.userMessage} Continuing automatically now.`);
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.1.0" };
     }
 
     if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
-    const candidates = generatedCandidatesFromResult(
+    let candidates = generatedCandidatesFromResult(
       result,
       snapshot.profile.mode === "private",
       sourceDetails,
     );
-    const qualitySlate = selectQualitySlate(
+    let qualitySlate = selectQualitySlate(
       candidates,
       requestedCount,
       (candidate) => calculateGenerationPriority(snapshot.profile, candidate.scores),
     );
-    const selected = qualitySlate.selected.map(({ candidate }) => candidate);
+    let selected = qualitySlate.selected.map(({ candidate }) => candidate);
+    if (selected.length === 0 && sourceDetails.engine === "python_multistage") {
+      result = await runDesktopFallback("The multi-stage ideas did not pass SIFT's local quality gate. Continuing with the standard generator.");
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.1.0" };
+      if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
+      candidates = generatedCandidatesFromResult(
+        result,
+        snapshot.profile.mode === "private",
+        sourceDetails,
+      );
+      qualitySlate = selectQualitySlate(
+        candidates,
+        requestedCount,
+        (candidate) => calculateGenerationPriority(snapshot.profile, candidate.scores),
+      );
+      selected = qualitySlate.selected.map(({ candidate }) => candidate);
+    }
     if (selected.length === 0) {
       const firstIssue = qualitySlate.rejected.flatMap(({ report }) => report.blockers)[0]?.message;
       throw new Error(firstIssue
@@ -2562,6 +2587,7 @@ export default function Home() {
         kind: "one-shot",
         preview: finalPreview,
         idea: chosenIdea,
+        buildHandoff: createBuildHandoff({ route: chosenIdea.route, decision: thesisScreen.decision }),
         thesisScreen,
         contextResearch: {
           ...(contextResult ? { result: contextResult } : {}),
@@ -2580,19 +2606,19 @@ export default function Home() {
       setQuickRunMessage("");
       setSection("results");
       setToast(thesisScreen.decision === "advance_to_validation"
-        ? "Idea screen complete: advance to validation"
+        ? "Idea screen complete: build handoff ready"
         : thesisScreen.decision === "revise_thesis"
-          ? "Idea screen complete: revise and rescreen"
+          ? "Idea screen complete: cautious prototype handoff ready"
           : thesisScreen.decision === "park_idea"
-            ? "Idea screen complete: park this idea"
-            : "Idea check saved with unanswered inputs");
+            ? "Idea screen complete: parked, with an optional learning prototype"
+            : "Idea check saved with an incomplete-screen build caution");
     } catch (error) {
       if (runId !== quickRunRequestRef.current) return;
       const message = friendlyAiError(error, llmConfig.provider);
       setQuickRunPhase("idle");
       setQuickRunMode("one-shot");
       setQuickRunOutcome(null);
-      setQuickRunMessage(`Run stopped: ${message}`);
+      setQuickRunMessage(`Needs attention: ${message}`);
       setLlmMessage(message);
       setLlmMessageTone("error");
       setSection("quick");
@@ -3073,7 +3099,8 @@ export default function Home() {
   function inspectQuickRunOutcome() {
     if (!quickRunOutcome) return;
     if (quickRunOutcome.kind === "one-shot") {
-      beginValidation();
+      setSection("build");
+      setToast("Build handoff ready — choose whether to create the first guarded prototype");
       return;
     }
     if (quickRunOutcome.research?.committed) {
@@ -3511,12 +3538,12 @@ export default function Home() {
         </header>
         <section className="hero">
           <div className="hero-copy">
-            <h1>Find an idea worth testing.</h1>
-            <p className="hero-lede">SIFT generates ideas, chooses the strongest one, and gives you a clear first test.</p>
+            <h1>Find an idea worth building.</h1>
+            <p className="hero-lede">SIFT generates ideas, chooses the strongest one, checks it, and prepares the guarded build handoff.</p>
             <div className="hero-actions">
               {hydrated && desktopAvailable === false
                 ? <a className="button primary" href="https://github.com/NickFields0101/sift/releases/latest" target="_blank" rel="noreferrer">Get SIFT Desktop <span aria-hidden="true">→</span></a>
-                : <button className="button primary" onClick={startQuickFromWelcome}>Generate & check <span aria-hidden="true">→</span></button>}
+                : <button className="button primary" onClick={startQuickFromWelcome}>Create to build <span aria-hidden="true">→</span></button>}
               <button className="button secondary" onClick={startWithIdea}>I already have an idea</button>
             </div>
             <details className="hero-more-ways">
@@ -3639,10 +3666,10 @@ export default function Home() {
         ) : section === "quick" && (
           <div className="page-section narrow quick-run-page">
             <PageHeading
-              eyebrow={quickRunMode === "one-shot" ? "Create & check" : quickRunMode === "research" ? "Research & check" : quickRunMode === "auto-preview" ? "AI preview" : "Guided flow"}
-              title={quickRunMode === "one-shot" ? "Finding your strongest idea." : quickRunMode === "research" ? "Researching the market." : quickRunMode === "auto-preview" ? "Preparing your preview." : "Working through each step."}
+              eyebrow={quickRunMode === "one-shot" ? "Create to build" : quickRunMode === "research" ? "Research & check" : quickRunMode === "auto-preview" ? "AI preview" : "Guided flow"}
+              title={quickRunMode === "one-shot" ? "Taking your idea to a build decision." : quickRunMode === "research" ? "Researching the market." : quickRunMode === "auto-preview" ? "Preparing your preview." : "Working through each step."}
               description={quickRunMode === "one-shot"
-                ? "SIFT is generating options, comparing them, and preparing the best one for testing."
+                ? "SIFT is generating options, comparing them, researching public context, checking the winner, and preparing its build handoff."
                 : quickRunMode === "research"
                 ? "SIFT is checking public sources and preserving exact citations before you decide what to save."
                 : quickRunMode === "auto-preview"
@@ -3651,11 +3678,11 @@ export default function Home() {
             />
             <section className="quick-run-working" aria-live="polite">
               <img src={SIFT_BRAND_TORNADO_URL} alt="" aria-hidden="true" />
-              <div><span>{quickRunBusy ? "Working" : quickRunMode === "one-shot" && quickRunMessage.startsWith("Run stopped:") ? "Stopped" : "Ready"}</span><h2>{quickRunMessage || "Preparing the next step."}</h2><p>{quickRunMode === "one-shot" ? "Generate → Compare → Research → Recommend" : quickRunMode === "research" ? "Idea → Research → Review → Result" : "Idea → Check → Evidence → Decision"}</p></div>
+              <div><span>{quickRunBusy ? "Working" : quickRunMode === "one-shot" && quickRunMessage.startsWith("Needs attention:") ? "Needs attention" : "Ready"}</span><h2>{quickRunMessage || "Preparing the next step."}</h2><p>{quickRunMode === "one-shot" ? "Create → Compare → Research → Decide → Build-ready" : quickRunMode === "research" ? "Idea → Research → Review → Result" : "Idea → Check → Evidence → Decision"}</p></div>
               {quickRunBusy && <i aria-hidden="true" />}
             </section>
             <div className="quick-run-boundary"><strong>{quickRunMode === "one-shot" ? "New ideas start with no customer evidence." : quickRunMode === "research" ? "Public research is not customer validation." : quickRunMode === "auto-preview" ? "A preview is not a saved decision." : "You stay in control."}</strong><span>{quickRunMode === "one-shot" ? "Public research adds context. Interviews and experiments begin after you choose the idea." : quickRunMode === "research" ? "Cited sources can add context, but only real-world tests can validate demand." : quickRunMode === "auto-preview" ? "AI works in a separate copy. Your saved review does not change." : "SIFT drafts the work and pauses where your approval matters."}</span></div>
-            <div className="quick-run-recovery-actions">{quickRunMode === "one-shot" && quickRunPhase === "idle" && <button className="button primary" onClick={() => void startOneShotRun()}>Try again</button>}<button className="button secondary" onClick={exitQuickRun}>{quickRunMode === "one-shot" ? "Back home" : "Exit"}</button></div>
+            <div className="quick-run-recovery-actions">{quickRunMode === "one-shot" && quickRunPhase === "idle" && <><button className="button primary" onClick={() => void startOneShotRun()}>Try again</button><button className="button secondary" onClick={() => { exitQuickRun(); setSection("model"); }}>AI settings</button></>}<button className="button secondary" onClick={exitQuickRun}>{quickRunMode === "one-shot" ? "Back home" : "Exit"}</button></div>
           </div>
         )}
 
@@ -4316,9 +4343,9 @@ export default function Home() {
               <div className="decision-summary-actions">
                 <strong>{state.review.stage === "thesis" ? `${liveThesisScreen.rawThesisScore.toFixed(1)} idea score` : `${score.validatedScore.toFixed(1)} evidence-backed score`}</strong>
                 <button className="button primary" disabled={!selectedIdea} onClick={state.review.stage === "thesis"
-                  ? liveThesisScreen.decision === "advance_to_validation" ? beginValidation : liveThesisScreen.decision === "park_idea" ? () => setSection("ideas") : () => setSection("review")
+                  ? () => setSection("build")
                   : score.official && score.numericEligible && score.gateEligible ? () => setSection("build") : () => setSection("evidence")}>{state.review.stage === "thesis"
-                    ? liveThesisScreen.decision === "advance_to_validation" ? "Start testing" : liveThesisScreen.decision === "park_idea" ? "Try another idea" : "Review the idea check"
+                    ? "Start building"
                     : score.official && score.numericEligible && score.gateEligible ? "Build the idea" : "Continue validation"}</button>
               </div>
             </section>}
@@ -4337,7 +4364,7 @@ export default function Home() {
                 <Metric label="Real-world evidence" value={0} note="Expected for a new idea" />
               </div>
               <div className="integrity-strip"><span>Decision basis <strong>Idea check only</strong></span><span>Validation evidence <strong>Not started</strong></span><span>Required checks <strong>G1 · G2 · G7</strong></span><span>Input fingerprint <code>{liveThesisScreen.inputFingerprint}</code></span></div>
-              <section className="build-handoff-strip validation-handoff"><div><p className="eyebrow">Next step</p><strong>Test the idea with real people and real behavior.</strong><span>Start with interviews or a small falsification test.</span></div><button className="button primary" disabled={!selectedIdea} onClick={beginValidation}>{selectedIdea ? "Start testing" : "Choose an idea first"}</button></section>
+              <section className="build-handoff-strip validation-handoff"><div><p className="eyebrow">Build handoff</p><strong>Turn this idea into a guarded learning prototype.</strong><span>The build brief is ready. Real validation can still begin at any time with interviews or a falsification test.</span></div><div><button className="button primary" disabled={!selectedIdea} onClick={() => setSection("build")}>{selectedIdea ? "Start building" : "Choose an idea first"}</button><button className="button secondary" disabled={!selectedIdea} onClick={beginValidation}>Start validation</button></div></section>
               {(liveThesisScreen.validationErrors.length > 0 || liveThesisScreen.decisionReasons.length > 0) && <div className="issue-columns">
                 {liveThesisScreen.validationErrors.length > 0 && <IssueList title="Incomplete idea-check inputs" items={liveThesisScreen.validationErrors} tone="error" />}
                 {liveThesisScreen.decisionReasons.length > 0 && <IssueList title="Reasons for this decision" items={liveThesisScreen.decisionReasons} tone="warning" />}
@@ -4386,6 +4413,9 @@ export default function Home() {
             state={state}
             score={score}
             selectedIdea={selectedIdea}
+            handoff={quickRunOutcome?.kind === "one-shot" && quickRunOutcome.idea.id === selectedIdea?.id
+              ? quickRunOutcome.buildHandoff ?? currentBuildHandoff
+              : currentBuildHandoff}
             desktopAvailable={desktopAvailable === true}
             onNavigate={setSection}
             onToast={setToast}
@@ -4722,9 +4752,9 @@ function QuickRunPreviewPanel({ outcome, onInspect, onDismiss }: {
     <section className={`quick-preview-result ${statusClass}`} aria-labelledby="quick-preview-title">
       <div className="quick-preview-head">
         <div><p className="eyebrow">{oneShot ? "Your strongest idea" : outcome.research ? "Research result" : "AI preview"}</p><h1 id="quick-preview-title" tabIndex={-1}>{idea.title}</h1><p>{idea.concept}</p></div>
-        <div className="quick-preview-status"><span>{oneShot ? "Idea check" : "Preview"}</span><strong>{statusLabel}</strong><small>{oneShot ? "Real-world validation comes next" : "Not saved as a final decision"}</small></div>
+        <div className="quick-preview-status"><span>{oneShot ? "Idea check" : "Preview"}</span><strong>{statusLabel}</strong><small>{oneShot ? "Build handoff prepared" : "Not saved as a final decision"}</small></div>
       </div>
-      <div className="quick-preview-explainer"><strong>{oneShot ? "SIFT generated several ideas, compared them, and checked whether this one is clear enough to test." : "AI prepared a separate preview. Your saved decision stays unchanged until you choose what to keep."}</strong><span>{oneShot ? "Public research may add context, but it does not count as customer evidence." : "Nothing was treated as verified evidence automatically."}</span></div>
+      <div className="quick-preview-explainer"><strong>{oneShot ? "SIFT generated several ideas, compared them, checked the winner, and prepared its guarded build brief." : "AI prepared a separate preview. Your saved decision stays unchanged until you choose what to keep."}</strong><span>{oneShot ? "Choose Start building to enter the build workspace. Public context is not customer validation, and nothing signs, spends, or deploys automatically." : "Nothing was treated as verified evidence automatically."}</span></div>
       {oneShot && decisionReasons.length > 0 && <div className="quick-preview-reasons"><strong>Why SIFT reached this recommendation</strong><ul>{decisionReasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>}
       <div className="quick-preview-notes">
         <div><strong>What must be true</strong><span>{idea.criticalAssumption}</span></div>
@@ -4766,7 +4796,7 @@ function QuickRunPreviewPanel({ outcome, onInspect, onDismiss }: {
         {citationResult && <details className="quick-preview-citations"><summary>{citationResult.citations.length} cited public source{citationResult.citations.length === 1 ? "" : "s"}</summary><ul>{citationResult.citations.map((citation) => <li key={citation.sourceId}><strong>{citation.title}</strong><span>{citationDomain(citation.url)}</span><code>{citation.url}</code></li>)}</ul></details>}
         <p className="quick-preview-model-line">Model {preview.provider} · {preview.model} · Context {preview.sourceInputFingerprint.slice(0, 12)}…</p>
       </details>
-      <div className="quick-preview-footer"><span>AI suggests. SIFT&apos;s rules score. You decide.</span><div><button className="button primary" onClick={onInspect}>{oneShot ? "Start testing" : outcome.research?.committed ? "Open saved evidence" : preview.selectedBy === "existing-user-choice" ? "Open detailed check" : "Review this idea"}</button><button className="text-button" onClick={onDismiss}>Close</button></div></div>
+      <div className="quick-preview-footer"><span>{oneShot ? "The idea, decision, and build brief are saved. Building remains your choice." : "AI suggests. SIFT's rules score. You decide."}</span><div><button className="button primary" onClick={onInspect}>{oneShot ? "Start building" : outcome.research?.committed ? "Open saved evidence" : preview.selectedBy === "existing-user-choice" ? "Open detailed check" : "Review this idea"}</button><button className="text-button" onClick={onDismiss}>{oneShot ? "Not now" : "Close"}</button></div></div>
     </section>
   );
 }
@@ -4837,15 +4867,15 @@ function Overview({ state, score, selectedIdea, desktopAvailable, oneShotReady, 
       <section className={`home-focus-card ${selectedIdea ? "has-idea" : ""}`}>
         <div className="home-focus-copy">
           <span className="quick-run-kicker">{selectedIdea ? "Current idea" : "One-click flow"}</span>
-          <h2>{selectedIdea?.title || "Generate, compare, and check the strongest idea."}</h2>
-          <p>{selectedIdea?.concept || "SIFT creates several options, chooses the best fit, and gives you a clear first experiment."}</p>
+          <h2>{selectedIdea?.title || "One click to a build-ready idea."}</h2>
+          <p>{selectedIdea?.concept || "SIFT creates several options, chooses the strongest fit, checks it, and prepares the path to a guarded prototype."}</p>
         </div>
         {!selectedIdea && <label className="home-boundary-field"><span>What are you curious about? <small>Optional</small></span><textarea rows={3} value={state.project.domain} placeholder="Example: helping people make healthier food choices" onChange={(event) => onUpdateProject({ domain: event.target.value })} /></label>}
         <div className="home-primary-actions">
           {selectedIdea
             ? <button className="button primary" onClick={() => onNavigate(nextTarget)}>{nextLabel} <span aria-hidden="true">→</span></button>
             : desktopAvailable
-            ? <button className="button primary" disabled={quickRunBusy} onClick={onOneShotRun}>{quickRunBusy ? "Creating your ideas…" : oneShotReady ? "Create my ideas" : "Connect AI to begin"}</button>
+            ? <button className="button primary" disabled={quickRunBusy} onClick={onOneShotRun}>{quickRunBusy ? "Running create to build…" : oneShotReady ? "Create to build" : "Connect AI to begin"}</button>
             : <a className="button primary" href="https://github.com/NickFields0101/sift/releases/latest" target="_blank" rel="noreferrer">Get SIFT Desktop</a>}
           {selectedIdea && (desktopAvailable
             ? <button className="button secondary" disabled={quickRunBusy} onClick={onOneShotRun}>Start with new ideas</button>
@@ -4917,10 +4947,11 @@ const BUILD_CATALOG_FALLBACK: BuildCatalogEntry[] = [
   },
 ];
 
-function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNavigate, onToast }: {
+function BuildWorkspace({ state, score, selectedIdea, handoff, desktopAvailable, onNavigate, onToast }: {
   state: AppState;
   score: ReturnType<typeof scoreReview>;
   selectedIdea?: IdeaCandidate;
+  handoff?: BuildHandoff;
   desktopAvailable: boolean;
   onNavigate: (section: Section) => void;
   onToast: (message: string) => void;
@@ -5044,6 +5075,7 @@ function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNaviga
         <section className="build-empty"><img src={SIFT_BRAND_TORNADO_URL} alt="" aria-hidden="true" /><div><p className="eyebrow">Idea required</p><h2>Choose an idea first.</h2><p>SIFT will use its technology fit, critical assumption, and first test to create the build brief.</p><button className="button primary" onClick={() => onNavigate("ideas")}>Choose an idea</button></div></section>
       ) : (
         <>
+          {handoff && <section className="build-handoff-strip build-ready-handoff" aria-label="Automated build handoff"><div><p className="eyebrow">Create-to-build complete</p><strong>{handoff.recommendedFirstSafeAction}</strong><span>{handoff.decisionCaution}</span></div><div><span>Recommended route</span><strong>{handoff.routeLabel}</strong><small>{handoff.recommendedTools.length > 0 ? handoff.recommendedTools.join(" + ") : "No protocol tool recommended"}</small></div></section>}
           <section className="build-hero">
             <div><span className={`build-readiness ${state.review.stage !== "thesis" && score.official && score.numericEligible && score.gateEligible ? "ready" : "provisional"}`}>{state.review.stage === "thesis" ? "Validation prototype" : score.official && score.numericEligible && score.gateEligible ? "Decision ready" : "Proceed with caution"}</span><p className="eyebrow">Selected idea</p><h2>{selectedIdea.title}</h2><p>{selectedIdea.concept}</p></div>
             <dl><div><dt>Technology fit</dt><dd>{selectedIdea.route}</dd></div><div><dt>{state.review.stage === "thesis" ? "Idea score" : "Evidence-backed score"}</dt><dd>{state.review.stage === "thesis" ? score.rawThesisScore.toFixed(1) : score.validatedScore.toFixed(1)}</dd></div><div><dt>Stage</dt><dd>{stageLabels[state.review.stage]}</dd></div><div><dt>Evidence</dt><dd>{state.review.artifacts.length}</dd></div></dl>
@@ -5077,11 +5109,13 @@ function BuildWorkspace({ state, score, selectedIdea, desktopAvailable, onNaviga
           <section className="build-starters">
             <div className="section-title"><div><p className="eyebrow">Recommended next step</p><h2>Create your first prototype.</h2></div><span>Generated output is always reviewed first.</span></div>
             <div className="build-starter-grid">
-              {(xahauRoute || selectedIdea.route === "Neither yet") && <article className="build-starter-card"><div><span className="build-step-chip">Xahau</span><h3>Create a Hook starter</h3><p>Choose the closest explicit archetype. SIFT sends only this allowlisted payload to local Xahau MCP and previews the returned C source.</p></div><label><span>Hook archetype</span><select value={hookArchetype} onChange={(event) => { setHookArchetype(event.target.value); setLimitConfirmed(false); }}><option value="">Choose one…</option><option value="firewall">Transaction firewall</option><option value="payment_limit">Payment limit</option><option value="require_dest_tag">Require destination tag</option><option value="state_counter">State counter</option><option value="notary">Notary</option><option value="accept_all">Minimal accept-all learning starter</option></select></label>{hookArchetype === "firewall" && <label><span>Block transaction type</span><select value={blockTxType} onChange={(event) => setBlockTxType(event.target.value)}>{["Payment", "SetHook", "TrustSet", "OfferCreate", "AccountSet", "URITokenMint", "Import", "Invoke"].map((item) => <option key={item}>{item}</option>)}</select></label>}{hookArchetype === "payment_limit" && <><label><span>Maximum drops</span><input inputMode="numeric" value={maxDrops} onChange={(event) => { setMaxDrops(event.target.value); setLimitConfirmed(false); }} /></label><label className="build-confirm"><input type="checkbox" checked={limitConfirmed} onChange={(event) => setLimitConfirmed(event.target.checked)} /><span>I reviewed this monetary cap. SIFT will not silently choose it for me.</span></label></>}<button className="button primary" disabled={!desktopAvailable || !xahauStatus?.runnable || !hookArchetype || (hookArchetype === "payment_limit" && (!paymentLimitValid || !limitConfirmed)) || running !== ""} onClick={scaffoldHook}>{running === "xahau-mcp:scaffold_hook" ? "Creating starter…" : "Create starter"}</button></article>}
+              {xahauRoute && <article className="build-starter-card"><div><span className="build-step-chip">Xahau</span><h3>Create a Hook starter</h3><p>Choose the closest explicit archetype. SIFT sends only this allowlisted payload to local Xahau MCP and previews the returned C source.</p></div><label><span>Hook archetype</span><select value={hookArchetype} onChange={(event) => { setHookArchetype(event.target.value); setLimitConfirmed(false); }}><option value="">Choose one…</option><option value="firewall">Transaction firewall</option><option value="payment_limit">Payment limit</option><option value="require_dest_tag">Require destination tag</option><option value="state_counter">State counter</option><option value="notary">Notary</option><option value="accept_all">Minimal accept-all learning starter</option></select></label>{hookArchetype === "firewall" && <label><span>Block transaction type</span><select value={blockTxType} onChange={(event) => setBlockTxType(event.target.value)}>{["Payment", "SetHook", "TrustSet", "OfferCreate", "AccountSet", "URITokenMint", "Import", "Invoke"].map((item) => <option key={item}>{item}</option>)}</select></label>}{hookArchetype === "payment_limit" && <><label><span>Maximum drops</span><input inputMode="numeric" value={maxDrops} onChange={(event) => { setMaxDrops(event.target.value); setLimitConfirmed(false); }} /></label><label className="build-confirm"><input type="checkbox" checked={limitConfirmed} onChange={(event) => setLimitConfirmed(event.target.checked)} /><span>I reviewed this monetary cap. SIFT will not silently choose it for me.</span></label></>}<button className="button primary" disabled={!desktopAvailable || !xahauStatus?.runnable || !hookArchetype || (hookArchetype === "payment_limit" && (!paymentLimitValid || !limitConfirmed)) || running !== ""} onClick={scaffoldHook}>{running === "xahau-mcp:scaffold_hook" ? "Creating starter…" : "Create starter"}</button></article>}
 
-              {(evernodeRoute || selectedIdea.route === "Neither yet") && <article className="build-starter-card"><div><span className="build-step-chip">Evernode</span><h3>Load contract patterns</h3><p>Ask local Evernode MCP for its reviewed starter catalog. Generated files remain previews and are never written or deployed automatically.</p></div><div className="build-assumption"><strong>Build brief anchor</strong><span>{selectedIdea.criticalAssumption || "Add the idea's critical assumption before scaffolding."}</span></div><button className="button primary" disabled={!desktopAvailable || !evernodeStatus?.runnable || running !== ""} onClick={() => void runBuildAction("evernode-mcp", "list_templates", {})}>{running === "evernode-mcp:list_templates" ? "Loading patterns…" : "Load patterns"}</button></article>}
+              {evernodeRoute && <article className="build-starter-card"><div><span className="build-step-chip">Evernode</span><h3>Load contract patterns</h3><p>Ask local Evernode MCP for its reviewed starter catalog. Generated files remain previews and are never written or deployed automatically.</p></div><div className="build-assumption"><strong>Build brief anchor</strong><span>{selectedIdea.criticalAssumption || "Add the idea's critical assumption before scaffolding."}</span></div><button className="button primary" disabled={!desktopAvailable || !evernodeStatus?.runnable || running !== ""} onClick={() => void runBuildAction("evernode-mcp", "list_templates", {})}>{running === "evernode-mcp:list_templates" ? "Loading patterns…" : "Load patterns"}</button></article>}
 
-              <article className="build-starter-card diagnostic"><div><span className="build-step-chip">Environment</span><h3>Check the compiler</h3><p>Run the fixed XAHC doctor command. SIFT does not pass renderer-controlled arguments, paths, or shell text.</p></div><button className="button secondary" disabled={!desktopAvailable || !xahcStatus?.runnable || running !== ""} onClick={() => void runBuildAction("xahc", "doctor", {})}>{running === "xahc:doctor" ? "Checking…" : "Run XAHC doctor"}</button></article>
+              {selectedIdea.route === "Neither yet" && <article className="build-starter-card"><div><span className="build-step-chip">Conventional</span><h3>Start without forcing a protocol</h3><p>SIFT found no material Xahau or Evernode advantage yet. Keep the first prototype conventional and revisit the route only if a concrete protocol need appears.</p></div><div className="build-assumption"><strong>Learning target</strong><span>{selectedIdea.criticalAssumption}</span></div><button className="button primary" onClick={() => downloadFile("sift-conventional-build-brief.md", brief, "text/markdown")}>Download starter brief</button></article>}
+
+              {xahauRoute && <article className="build-starter-card diagnostic"><div><span className="build-step-chip">Environment</span><h3>Check the compiler</h3><p>Run the fixed XAHC doctor command. SIFT does not pass renderer-controlled arguments, paths, or shell text.</p></div><button className="button secondary" disabled={!desktopAvailable || !xahcStatus?.runnable || running !== ""} onClick={() => void runBuildAction("xahc", "doctor", {})}>{running === "xahc:doctor" ? "Checking…" : "Run XAHC doctor"}</button></article>}
             </div>
           </section>
 
