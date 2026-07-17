@@ -72,8 +72,8 @@ test("thesis screens do not expose validation-only controls", async () => {
 
   const evidenceSection = page.slice(evidenceStart, evidenceEnd);
   const overview = page.slice(overviewStart);
-  assert.match(evidenceSection, /state\.review\.stage === "thesis"[^]*Start validation/);
-  assert.match(evidenceSection, /state\.review\.stage !== "thesis" && <>[^]*Find cited public context[^]*Organize evidence you already have[^]*Add an evidence record/);
+  assert.match(evidenceSection, /state\.review\.stage === "thesis"[^]*Start testing/);
+  assert.match(evidenceSection, /state\.review\.stage !== "thesis" && <>[^]*Research public sources[^]*Turn your notes into evidence[^]*Add evidence manually/);
   assert.match(page, /STAGES\.filter\(\(item\) => item !== "thesis"\)/);
   assert.match(page, /state\.review\.gates\.filter\(\(gate\) => state\.review\.stage !== "thesis" \|\| gate\.id === "G1" \|\| gate\.id === "G2" \|\| gate\.id === "G7"\)/);
   assert.match(page, /state\.review\.stage !== "thesis" && <label className="compact-field"><span>Evidence<\/span>/);
@@ -98,10 +98,10 @@ test("AI one-click Quick Run calculates only an isolated preview", async () => {
   assert.equal((quickFunction.match(/\bsetState\(/g) ?? []).length, 1);
   assert.doesNotMatch(quickFunction, /applyEvaluationProposals|applyEvidenceProposals|applyGateProposal|updateReview|updateClaim|updateGate|setSelectedEvaluationClaims|reviewerVerified\s*:\s*true/);
   assert.doesNotMatch(quickFunction, /extractEvidence|artifacts\s*:/);
-  assert.match(page, /Local profile priority selected the idea when needed; AI proposed missing merits and gates;[^<]*locked local formula calculated the preview/);
-  assert.match(page, /No evidence was created, upgraded, or verified\. Your live review[^<]*not changed/);
-  assert.match(page, /Derived from idea route:/);
-  assert.match(page, /Existing route preserved or still unresolved/);
+  assert.match(page, /AI prepared a separate preview\. Your saved decision stays unchanged until you choose what to keep/);
+  assert.match(page, /Nothing was treated as verified evidence automatically/);
+  assert.match(page, /Technology fit/);
+  assert.match(page, /Saved evidence/);
 });
 
 test("Generate & Screen separates a fresh thesis decision from venture validation", async () => {
@@ -136,10 +136,10 @@ test("Generate & Screen separates a fresh thesis decision from venture validatio
   assert.match(oneShot, /ideas: stateAtCommit\.ideas/);
   assert.doesNotMatch(oneShot, /selectedAtStart|completeAutomatedResearchRun|applyResearchEvidenceBatch|committed: true/);
   assert.doesNotMatch(oneShot, /window\.confirm|reviewerVerified\s*:\s*true|acknowledgedCounterEvidenceIds/);
-  assert.match(page, /Fresh ideas → Public context → Thesis screen → Discovery decision/);
-  assert.match(page, /No customer evidence is expected yet/);
+  assert.match(page, /Generate → Compare → Research → Recommend/);
+  assert.match(page, /New ideas start with no customer evidence/);
   assert.match(page, /Validation has not started/);
-  assert.match(page, /ADVANCE TO VALIDATION/);
+  assert.match(page, /WORTH TESTING/);
 });
 
 test("Research & Run keeps cited evidence transient until one consolidated approval", async () => {
@@ -164,8 +164,8 @@ test("Research & Run keeps cited evidence transient until one consolidated appro
   assert.equal((approvalFunction.match(/\bsetState\(/g) ?? []).length, 1, "approval commits the packet atomically");
   assert.match(approvalFunction, /review: researchRunDraft\.liveReviewWithResearch/);
   assert.match(page, /I confirm these are the cited public sources I want attached/);
-  assert.match(page, /DeskResearch · E1/);
-  assert.match(page, /Contradictions are never auto-acknowledged/);
+  assert.match(page, /Public research · E1/);
+  assert.match(page, /Challenges are never dismissed automatically/);
 });
 
 test("Guided Quick Run stages AI suggestions and preserves human approval", async () => {
@@ -180,12 +180,12 @@ test("Guided Quick Run stages AI suggestions and preserves human approval", asyn
   assert.match(quickFunctions, /scope: "gates_only"/);
   assert.match(quickFunctions, /confirmRemoteQuickRunSend/);
   assert.match(quickFunctions, /const runId = \+\+quickRunRequestRef\.current/);
-  assert.match(quickFunctions, /Review and explicitly apply only the merit drafts you agree with/);
-  assert.match(quickFunctions, /Apply each gate separately, or leave it unresolved/);
+  assert.match(quickFunctions, /Review and apply only the score drafts you agree with/);
+  assert.match(quickFunctions, /Apply each required check separately, or leave it unresolved/);
   assert.doesNotMatch(quickFunctions, /applyEvaluationProposals|applyEvidenceProposals|applyGateProposal|reviewerVerified\s*:\s*true/);
-  assert.match(page, /Quick does not mean automatic approval/);
-  assert.match(page, /Continue evidence-free/);
-  assert.match(page, /Send & refresh gates/);
+  assert.match(page, /You stay in control/);
+  assert.match(page, /Continue without evidence/);
+  assert.match(page, /Send & refresh checks/);
   assert.match(page, /Cloud model: each AI step confirms before project or evidence context is sent/);
 });
 
@@ -198,7 +198,7 @@ test("Quick Run progress keeps connector geometry separate from accessible label
   const guideEnd = page.indexOf("function Overview", guideStart);
   assert.ok(guideStart >= 0 && guideEnd > guideStart);
   const guide = page.slice(guideStart, guideEnd);
-  assert.match(guide, /aria-label="Quick Run progress"/);
+  assert.match(guide, /aria-label="Guided flow progress"/);
   assert.match(guide, /aria-live="polite"/);
   assert.match(guide, /aria-current=\{active \? "step" : undefined\}/);
   assert.match(guide, /className="quick-run-step-marker" aria-hidden="true"/);
@@ -389,6 +389,8 @@ test("model editor changes beat late config responses and keep raw keys on their
   assert.match(page, /Base URL[^]*beginModelEditorChange\(\{ clearRawKey: true, clearCatalog: true \}\)/);
   assert.match(page, /onChange=\{\(event\) => \{\s*beginModelEditorChange\(\);\s*const nextKey/);
   assert.match(page, /requestId !== modelConfigRequestRef\.current/);
+  assert.match(page, /setLlmConnectionVerified\(result\.ok\)/);
+  assert.match(page, /pendingOneShot && !llmConnectionVerified/);
   assert.match(page, /const modelEditorLocked = clearingLocalData[^]*llmBusy !== null/);
   assert.match(page, /const modelEditorLocked = clearingLocalData[^]*generatingIdeas[^]*aiAssistBusy !== null[^]*quickRunBusy/);
 });
