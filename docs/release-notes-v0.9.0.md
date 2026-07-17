@@ -4,6 +4,20 @@ Version 0.9.0 replaces the one-pass idea prompt with a contract-first,
 three-pass Idea Forge while preserving SIFT's deterministic evidence and
 decision boundaries.
 
+## Simpler product journey
+
+- Home now presents one primary path: connect a model, generate and screen a
+  fresh idea, then start real-world validation only when the thesis earns it.
+- The full one-click flow reports clear progress and keeps the final thesis
+  decision available after the run instead of forcing users back through the
+  workflow.
+- Advanced review controls and the 51-claim rubric remain available through
+  progressive disclosure without dominating the default experience.
+- Model setup, connection failures, recovery actions, evidence boundaries, and
+  build-tool readiness are explained in plain language at the point of use.
+- Updated SIFT tornado artwork is used consistently in the app header and
+  workflow status surfaces in both light and dark themes.
+
 ## Better idea generation
 
 - Python now frames opportunity mechanisms before proposing solutions,
@@ -38,6 +52,8 @@ decision boundaries.
 
 - The user-facing one-click flow remains one action; its internal gates are now
   explicit and ordered.
+- Windows and macOS packages embed the supervised Python intelligence worker;
+  users do not need to install Python or Docker.
 - The Python worker remains isolated, bounded, cancellable, and unable to write
   project state or alter SIFT's deterministic score.
 - TypeScript still owns project mutation, evidence integrity, official scoring,

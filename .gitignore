@@ -49,3 +49,7 @@ next-env.d.ts
 /desktop-dist/
 /desktop/intelligence-runtime/
 /release/
+
+# python
+__pycache__/
+*.py[cod]
