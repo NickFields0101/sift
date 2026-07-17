@@ -5,7 +5,7 @@ import json
 import time
 import unittest
 
-from desktop.intelligence_worker.idea_forge import validate_final_ideas
+from desktop.intelligence_worker.idea_forge import _parse_json, validate_final_ideas
 from desktop.intelligence_worker.protocol import PROTOCOL, ProtocolError, validate_envelope, validate_run_request
 from desktop.intelligence_worker.worker import Worker
 
@@ -144,6 +144,35 @@ class IdeaForgeProtocolTests(unittest.TestCase):
 
 
 class IdeaForgeValidationTests(unittest.TestCase):
+    def test_parser_accepts_bom_prose_and_one_fenced_or_balanced_object(self):
+        expected = {"frames": [{"label": "A", "nested": {"brace": "}"}}]}
+        encoded = json.dumps(expected)
+        self.assertEqual(_parse_json("\ufeff  " + encoded, "framing"), expected)
+        self.assertEqual(_parse_json("Here is the requested result:\n" + encoded, "framing"), expected)
+        self.assertEqual(
+            _parse_json("Result follows.\n```json\n" + encoded + "\n```\nDone.", "framing"),
+            expected,
+        )
+
+    def test_parser_rejects_multiple_or_truncated_json_objects(self):
+        with self.assertRaises(ProtocolError):
+            _parse_json('{"frames": []}\n{"frames": []}', "framing")
+        with self.assertRaises(ProtocolError):
+            _parse_json('Result: {"frames": []}\nThen: {"frames": [', "framing")
+        with self.assertRaises(ProtocolError):
+            _parse_json('```json\n{"frames": []}\n```\n```json\n{"frames": []}\n```', "framing")
+
+    def test_extra_output_keys_are_ignored_when_required_fields_remain(self):
+        packet = final_ideas(1)
+        packet["modelCommentary"] = "ignored"
+        packet["ideas"][0]["modelCommentary"] = "ignored"
+        packet["ideas"][0]["scores"]["confidence"] = 41
+        packet["ideas"][0]["experimentPlan"]["notes"] = "ignored"
+        validated = validate_final_ideas(packet, 1, "neutral")
+        self.assertNotIn("modelCommentary", validated[0])
+        self.assertNotIn("confidence", validated[0]["scores"])
+        self.assertNotIn("notes", validated[0]["experimentPlan"])
+
     def test_final_set_requires_exact_count_and_neutral_personal_fit_null(self):
         with self.assertRaises(ProtocolError):
             validate_final_ideas(final_ideas(1), 2, "neutral")
@@ -151,6 +180,14 @@ class IdeaForgeValidationTests(unittest.TestCase):
         packet["ideas"][0]["scores"]["personalFit"] = 50
         with self.assertRaises(ProtocolError):
             validate_final_ideas(packet, 2, "neutral")
+
+    def test_private_profile_requires_numeric_personal_fit(self):
+        packet = final_ideas(1)
+        with self.assertRaises(ProtocolError):
+            validate_final_ideas(packet, 1, "private")
+        packet["ideas"][0]["scores"]["personalFit"] = 73
+        validated = validate_final_ideas(packet, 1, "private")
+        self.assertEqual(validated[0]["scores"]["personalFit"], 73.0)
 
     def test_forced_both_route_and_invented_evidence_are_rejected(self):
         packet = final_ideas(1)

@@ -50,6 +50,8 @@ export interface ListModelsInput extends LlmConnectionOptions {
 export interface GenerateIdeasInput extends LlmConnectionOptions {
   prompt: string;
   count?: number;
+  /** Controls whether personalFit must be private-profile numeric data or neutral null. */
+  profileMode?: "neutral" | "private";
 }
 
 export type AiProposalConfidence = "low" | "medium" | "high";
