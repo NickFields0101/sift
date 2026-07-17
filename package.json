@@ -1,6 +1,6 @@
 {
-  "name": "xahau-evernode-sift",
-  "version": "0.9.0",
+  "name": "sift",
+  "version": "0.11.0",
   "description": "SIFT: local-first deterministic idea generation and evidence validation for Xahau and Evernode.",
   "author": "Nick Fields",
   "homepage": "https://github.com/NickFields0101/sift#readme",
@@ -22,7 +22,7 @@
     "start": "vinext start",
     "preview": "node scripts/preview-local.mjs",
     "pretest": "vinext build",
-    "test": "node --test tests/scoring.test.ts tests/ai-assistance.test.ts tests/research-run.test.ts tests/quick-run.test.ts tests/idea-quality.test.ts tests/model-search.test.ts tests/personality.test.ts tests/storage-migration.test.ts tests/intelligence-client.test.ts tests/intelligence-bridge.test.mjs tests/llm-core.test.mjs tests/build-tools.test.mjs tests/desktop-security.test.mjs tests/rendered-html.test.mjs desktop/intelligence-bridge.test.mjs",
+    "test": "node --test tests/scoring.test.ts tests/ai-assistance.test.ts tests/ai-run-recovery.test.ts tests/build-handoff.test.ts tests/research-run.test.ts tests/quick-run.test.ts tests/idea-quality.test.ts tests/model-search.test.ts tests/personality.test.ts tests/storage-migration.test.ts tests/intelligence-client.test.ts tests/intelligence-bridge.test.mjs tests/llm-core.test.mjs tests/build-tools.test.mjs tests/desktop-security.test.mjs tests/rendered-html.test.mjs desktop/intelligence-bridge.test.mjs",
     "intelligence:test": "python -m unittest discover -s desktop/intelligence_worker/tests -p \"test_*.py\"",
     "intelligence:build": "python scripts/build-intelligence-worker.py",
     "intelligence:smoke": "node scripts/smoke-intelligence-worker.mjs",
@@ -37,11 +37,9 @@
     "predesktop:package:mac": "npm run desktop:build && npm run intelligence:build && npm run intelligence:smoke",
     "desktop:package:mac": "node scripts/package-desktop.mjs --platform mac",
     "brand:render": "node scripts/render-sift-assets.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop-dist --ignore-pattern release",
-    "db:generate": "drizzle-kit generate"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern desktop-dist --ignore-pattern release"
   },
   "dependencies": {
-    "drizzle-orm": "0.45.2",
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6"
@@ -54,7 +52,6 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
-    "drizzle-kit": "0.31.10",
     "electron": "^43.1.0",
     "electron-builder": "^26.15.3",
     "eslint": "9.39.4",
@@ -142,7 +139,7 @@
       "createStartMenuShortcut": true
     },
     "portable": {
-      "artifactName": "SIFT-Portable-${version}-${arch}.${ext}"
+      "artifactName": "SIFT.${ext}"
     }
   }
 }

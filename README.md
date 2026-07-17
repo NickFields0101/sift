@@ -1,4 +1,4 @@
-# SIFT — Xahau + Evernode
+# SIFT
 
 SIFT is a local-first, optional-AI venture workspace for Xahau and Evernode projects. It moves a founder from a broad search profile to falsifiable candidates, helps organize a review, calculates stage readiness with a locked 51-claim rubric, and carries the selected opportunity into a guarded local Build workspace.
 
@@ -8,12 +8,12 @@ No account or ChatGPT sign-in is required in the desktop edition.
 
 Download the latest files from [SIFT Releases](https://github.com/NickFields0101/sift/releases/latest).
 
-- **Installer:** download `SIFT-Setup-0.9.0-x64.exe`, double-click it, choose an install folder, and launch SIFT from the desktop or Start menu.
-- **Portable:** download `SIFT-Portable-0.9.0-x64.exe` and double-click it. It runs without installing anything.
+- **Installer:** download `SIFT-Setup-0.11.0-x64.exe`, double-click it, choose an install folder, and launch SIFT from the desktop or Start menu.
+- **Portable:** download `SIFT.exe` and double-click it. It runs without installing anything.
 
 No app account, wallet, ChatGPT sign-in, or AI connection is required. The app works immediately with manual ideas and the starter slate. Connecting Ollama, LM Studio, OpenRouter, or another compatible model is optional. Choosing OpenRouter requires the user's own OpenRouter account, API key, and credits.
 
-Version `0.9.0` is not yet code-signed, so Windows SmartScreen may display an **Unknown publisher** warning. Verify the download against `SHA256SUMS.txt` on the release page before choosing **More info** and **Run anyway**. Organizations distributing the app broadly should code-sign future builds.
+Version `0.11.0` is not yet code-signed, so Windows SmartScreen may display an **Unknown publisher** warning. Verify the download against `SHA256SUMS.txt` on the release page before choosing **More info** and **Run anyway**. Organizations distributing the app broadly should code-sign future builds.
 
 ## Download and install on macOS
 
@@ -38,7 +38,7 @@ The packaged desktop app runs locally and supports:
 
 The renderer has no direct network authority. A narrow, isolated desktop bridge handles configuration, connection testing, model discovery, idea generation, optional review assistants, and bounded OpenRouter public research. Local providers are restricted to loopback addresses.
 
-Generate & Screen uses SIFT's supervised Python intelligence engine for two bounded jobs. **Idea Forge** first frames distinct actor/problem mechanisms, generates a wider slate, and then runs a separate critique-and-revision pass. After selection, the engine performs competitor mapping, assumption analysis, and red-teaming. Python runs as a private sidecar process with no listening port and returns only provisional structured hypotheses. TypeScript validates every result, applies the deterministic idea-construction gate, removes near-duplicates, and remains the sole authority for project state, evidence policy, scoring, gates, and decisions. The Windows and macOS packages embed the worker, so users do not install Python or Docker.
+Create to Build uses SIFT's supervised Python intelligence engine for two bounded jobs. **Idea Forge** first frames distinct actor/problem mechanisms, generates a wider slate, and then runs a separate critique-and-revision pass. After selection, the engine performs competitor mapping, assumption analysis, and red-teaming. Python runs as a private sidecar process with no listening port and returns only provisional structured hypotheses. TypeScript validates every result, applies the deterministic idea-construction gate, removes near-duplicates, and remains the sole authority for project state, evidence policy, scoring, gates, decisions, and the guarded build handoff. The Windows and macOS packages embed the worker, so users do not install Python or Docker.
 
 The interface includes persistent light and dark modes. Theme preference is stored separately from project and model data.
 
@@ -75,14 +75,16 @@ The two review assistants are available only in the desktop edition with a conne
 
 If you choose a cloud provider, the relevant idea, review context, or pasted evidence source is sent to that provider for the requested operation. Use Ollama or LM Studio when the material must remain on the device.
 
-## Generate & Screen: the one-click idea workflow
+## Create to Build: the one-click idea workflow
 
 SIFT separates two jobs that must not be scored as if they were the same thing:
 
 1. **Explore:** generate a new business hypothesis and decide whether it is worth testing.
 2. **Validate:** collect real-world evidence after the idea exists and decide whether it has earned stage advancement.
 
-In the desktop app, connect any supported model and choose **Generate & screen**. The one visible action runs an ordered internal workflow: opportunity framing, divergent candidate generation, independent critique and revision, local schema and thesis-construction checks, duplicate removal, weighted profile ordering, public context when available, and the deterministic thesis screen. The order is deliberate: the model does not get to invent a shallow idea and grade that same first draft as if it were finished.
+In the desktop app, connect any supported model and choose **Create to build**. The one visible action runs an ordered internal workflow: opportunity framing, divergent candidate generation, independent critique and revision, local schema and thesis-construction checks, duplicate removal, weighted profile ordering, public context when available, the deterministic thesis screen, and a route-aware guarded build handoff. The order is deliberate: the model does not get to invent a shallow idea and grade that same first draft as if it were finished.
+
+If the multi-stage Python Idea Forge stops, times out, or returns malformed structured output, SIFT automatically makes one bounded attempt with its standard generator and continues the same workflow. Authentication, credit, and rate-limit errors do not trigger another provider request; SIFT instead shows the specific account action required. The completed result asks **Start building** or **Not now**. No local build tool runs before that choice.
 
 Every final candidate must name a specific actor and trigger, the current workflow, a material consequence, an economic buyer, a reachable first distribution wedge, adoption friction, a conventional implementation counterfactual, the exact Xahau/Evernode job if one exists, the largest failure case, one atomic assumption, and a structured 1â€“14 day test with a metric plus pass and kill thresholds. Xahau and Evernode are grounded in a bounded capability contract. A conventional `Neither yet` route is validâ€”and preferredâ€”when a ledger or independently hosted consensus service does not create a real advantage.
 
@@ -92,7 +94,9 @@ With OpenRouter, SIFT may also gather exact-citation public context about market
 
 The locked thesis screen returns **Advance to validation**, **Revise & rescreen**, **Park this idea**, or **Screen incomplete**. Its formula uses raw hypothesis merit plus the G1, G2, and G7 screen gates. It never requires customer evidence. The generated slate, selected idea, and thesis screen are saved atomically, and one undo restores the prior project.
 
-Choosing **Start validation** opens Discovery with an intentionally empty evidence ledger and resets AI-owned screen gates. `0 direct records` is the correct starting state—not an error. From that point forward, SIFT's strict evidence grades, verification requirements, caps, floors, counterevidence rules, and formal stage decisions apply.
+Choosing **Start building** opens the guarded Build workspace with the selected idea, deterministic thesis decision, route, critical assumption, first experiment, and build brief already prepared. A Xahau route recommends Xahau MCP, an Evernode route recommends Evernode MCP, a hybrid keeps the two layers separate, and `Neither yet` recommends a conventional prototype instead of forcing protocol use. Generated artifacts remain previews; SIFT never signs, spends, leases, submits, or deploys automatically.
+
+**Start validation** remains available whenever the founder wants to begin Discovery. It opens an intentionally empty evidence ledger and resets AI-owned screen gates. `0 direct records` is the correct starting state—not an error. From that point forward, SIFT's strict evidence grades, verification requirements, caps, floors, counterevidence rules, and formal stage decisions apply.
 
 ## Optional preview and guided modes
 
@@ -127,10 +131,10 @@ Upstream XAHC releases currently cover macOS arm64 and Linux x86_64; Windows req
 
 ## Use the framework
 
-1. Select **Generate & screen** for the one-click idea workflow, or choose a manual starting point.
+1. Select **Create to build** for the one-click idea workflow, or choose a manual starting point.
 2. Generate ideas with a connected model, add your own, try the examples, or copy the prompt into any LLM.
 3. Read the deterministic thesis decision. A new idea is judged on hypothesis quality, not on evidence that could not exist yet. Optional 0–100 exploration estimates only order the idea list; they are not validated scores.
-4. Choose **Start validation** when the winner deserves testing. Discovery begins with zero direct evidence and unresolved formal gates.
+4. Choose **Start building** to enter the guarded build workspace with the route-aware brief already prepared, or choose **Start validation** to begin Discovery with zero direct evidence and unresolved formal gates.
 5. Open **Validation evidence**, attach real observations and tests, use the desktop organizer with actual source material, or select **Find cited public context**. Public findings stay E1; the validator checks type ceilings, dates, verification, claim links, duplicates, and counterevidence.
 6. Resolve the eight non-compensable gates.
 7. Open **Stage decision** to read the evidence-backed outputs and every active cap, floor, validation error, and blocker.
@@ -161,7 +165,7 @@ Upstream XAHC releases currently cover macOS arm64 and Linux x86_64; Windows req
 - Computed fields in imported packets are ignored and recalculated locally.
 - API credentials are never stored in project JSON or browser storage.
 - Evaluation and evidence AI drafts remain staged until the user explicitly applies them; each application can be undone in one click.
-- Generate & Screen saves only the fresh idea slate and E0 thesis screen atomically. It never creates or verifies direct validation evidence.
+- Create to Build saves the fresh idea slate and E0 thesis screen atomically, then prepares a route-aware build handoff. It never creates or verifies direct validation evidence, and no build tool runs before the separate **Start building** choice.
 - The separate Preview mode is calculated in an isolated shadow review and cannot overwrite the live review.
 - Research & Run accepts only exact provider-returned citation excerpts, keeps public findings at DeskResearch/E1, and commits the complete packet atomically only after one consolidated confirmation.
 - Public research sends a public-safe idea brief to OpenRouter, the selected upstream model provider, and OpenRouter's configured Exa search service. It never sends raw personality answers, wallet material, or the full local evidence ledger to the search step.
@@ -172,7 +176,7 @@ Upstream XAHC releases currently cover macOS arm64 and Linux x86_64; Windows req
 - Choosing OpenRouter sends the displayed prompt and operation-specific context to OpenRouter and the selected upstream model provider. Other remote compatible endpoints receive the same material; the UI warns about these boundaries.
 - Do not enter wallet seeds, regulated personal data, or confidential evidence bodies.
 
-**Clear project** removes the active workspace but keeps the saved AI connection. **Clear everything** also removes the provider, model, and operating-system-protected API key. Export important work first.
+**Clear local data** in Settings removes the active workspace, profile, provider, model, and operating-system-protected API key. Export important work first.
 
 ## Development
 

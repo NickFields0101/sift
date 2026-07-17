@@ -296,6 +296,29 @@ test("Idea Forge is optional and returns an unavailable fallback without startin
   assert.equal(started, false);
 });
 
+test("Idea Forge preserves a bounded worker error code for safe recovery decisions", async () => {
+  installBridge({
+    getStatus: async () => ({ available: true }),
+    start: async () => ({ runId: "forge-failed" }),
+    cancel: async () => ({ cancelled: false }),
+    getEvents: async () => ({
+      status: "failed",
+      events: [],
+      error: {
+        code: "invalid_model_output",
+        message: "The framing pass did not return valid JSON.",
+      },
+    }),
+  });
+
+  const outcome = await runIdeaForgeIntelligence(ideaForgeInputFixture());
+  assert.deepEqual(outcome, {
+    kind: "failed",
+    code: "invalid_model_output",
+    message: "The framing pass did not return valid JSON.",
+  });
+});
+
 test("missing Python bridge returns unavailable instead of breaking the existing workflow", async () => {
   Object.defineProperty(globalThis, "window", { configurable: true, value: { sift: {} } });
   const outcome = await runCompetitorRedTeamIntelligence(inputFixture());
