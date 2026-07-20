@@ -1322,7 +1322,12 @@ export default function Home() {
   const [llmConnectionVerified, setLlmConnectionVerified] = useState(false);
   const [ideaCount, setIdeaCount] = useState(8);
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
-  const [lastGeneration, setLastGeneration] = useState<{ provider: string; model: string; count: number } | null>(null);
+  const [lastGeneration, setLastGeneration] = useState<{
+    provider: string;
+    model: string;
+    count: number;
+    ideaIds?: string[];
+  } | null>(null);
   const [aiAssistBusy, setAiAssistBusy] = useState<"evaluation" | "evidence" | null>(null);
   const [evaluationNotes, setEvaluationNotes] = useState("");
   const [evaluationDraft, setEvaluationDraft] = useState<EvaluationDraftState | null>(null);
@@ -1618,6 +1623,10 @@ export default function Home() {
     () =>
       [...state.ideas].sort((a, b) => compareIdeaCandidates(state.profile, a, b)),
     [state.ideas, state.profile],
+  );
+  const latestGeneratedIdeaIds = useMemo(
+    () => new Set(lastGeneration?.ideaIds ?? []),
+    [lastGeneration],
   );
 
   const prompt = useMemo(
@@ -2259,7 +2268,13 @@ export default function Home() {
       if (requestId !== generationRequestRef.current) return;
       const { candidates, result } = slate;
       setState((current) => ({ ...current, ideas: [...current.ideas, ...candidates] }));
-      setLastGeneration({ provider: result.provider, model: result.model, count: candidates.length });
+      setLastGeneration({
+        provider: result.provider,
+        model: result.model,
+        count: candidates.length,
+        ideaIds: candidates.map((candidate) => candidate.id),
+      });
+      setSection("ideas");
       setToast(slate.partial
         ? `${candidates.length} distinct hypotheses passed the local quality gate`
         : `${candidates.length} multi-stage hypotheses added`);
@@ -2326,7 +2341,12 @@ export default function Home() {
         if (runId !== quickRunRequestRef.current) return;
         candidates = slate.candidates;
         setState((current) => ({ ...current, ideas: [...current.ideas, ...candidates] }));
-        setLastGeneration({ provider: slate.result.provider, model: slate.result.model, count: candidates.length });
+        setLastGeneration({
+          provider: slate.result.provider,
+          model: slate.result.model,
+          count: candidates.length,
+          ideaIds: candidates.map((candidate) => candidate.id),
+        });
       }
 
       const chosenIdea = selectedAtStart ?? [...candidates].sort(
@@ -3043,7 +3063,12 @@ export default function Home() {
       if (runId !== quickRunRequestRef.current) return;
       const candidates = slate.candidates;
       setState((current) => ({ ...current, ideas: [...current.ideas, ...candidates] }));
-      setLastGeneration({ provider: slate.result.provider, model: slate.result.model, count: candidates.length });
+      setLastGeneration({
+        provider: slate.result.provider,
+        model: slate.result.model,
+        count: candidates.length,
+        ideaIds: candidates.map((candidate) => candidate.id),
+      });
       setQuickRunPhase("choose-idea");
       setQuickRunMessage("Choose one idea to continue. SIFT will not choose a business direction for you.");
       setSection("ideas");
@@ -3833,6 +3858,16 @@ export default function Home() {
                 <button className="button small secondary" onClick={() => copyText(prompt, "LLM prompt copied")}>Copy prompt</button>
               </details>
             </details>
+            {lastGeneration && (lastGeneration.ideaIds?.length ?? 0) > 0 && (
+              <div className="generation-result" role="status">
+                <div>
+                  <span>Latest generation</span>
+                  <strong>{lastGeneration.count} new idea{lastGeneration.count === 1 ? "" : "s"} added</strong>
+                  <small>New ideas are marked below and ranked with your existing ideas.</small>
+                </div>
+                <b>{state.ideas.length} total</b>
+              </div>
+            )}
             {sortedIdeas.length === 0 ? (
               <EmptyState number="00" title="No ideas yet" text="Generate new ideas, add your own, or try four examples." />
             ) : (
@@ -3840,12 +3875,13 @@ export default function Home() {
                 {sortedIdeas.map((idea, index) => {
                   const priority = calculateGenerationPriority(state.profile, idea.scores);
                   const quality = assessIdeaQuality(idea);
+                  const isNew = latestGeneratedIdeaIds.has(idea.id);
                   return (
-                    <article className="idea-card idea-card-simple" key={idea.id}>
+                    <article className={`idea-card idea-card-simple${isNew ? " idea-card-new" : ""}`} key={idea.id}>
                       <div className="idea-rank"><span>#{String(index + 1).padStart(2, "0")}</span><strong>{priority}</strong><small>{index === 0 ? "Best match" : "Match score"}</small></div>
                       <div className="idea-body">
                         <div className="idea-summary-head">
-                          <div><span>{idea.route}</span><h2>{idea.title || "Untitled idea"}</h2></div>
+                          <div><span>{idea.route}</span>{isNew && <em className="idea-new-chip">New</em>}<h2>{idea.title || "Untitled idea"}</h2></div>
                           <em className={`idea-quality-chip ${quality.disposition}`}>{quality.disposition === "accept" ? "Ready to test" : quality.disposition === "repair" ? "Review" : "Needs work"}</em>
                         </div>
                         <p className="idea-concept">{idea.concept || "Add a one-sentence description."}</p>

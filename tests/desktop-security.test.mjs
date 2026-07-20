@@ -39,6 +39,10 @@ test("AI generation cannot write deterministic review inputs", async () => {
   assert.ok(generationStart >= 0 && generationEnd > generationStart);
   const generationFunction = page.slice(generationStart, generationEnd);
   assert.match(generationFunction, /ideas:\s*\[\.\.\.current\.ideas, \.\.\.candidates\]/);
+  assert.match(generationFunction, /ideaIds:\s*candidates\.map\(\(candidate\) => candidate\.id\)/);
+  assert.match(generationFunction, /setSection\("ideas"\)/);
+  assert.match(page, /Latest generation/);
+  assert.match(page, /New ideas are marked below and ranked with your existing ideas/);
   assert.doesNotMatch(generationFunction, /updateReview|updateClaim|updateGate|artifacts|gates|claims/);
 });
 
