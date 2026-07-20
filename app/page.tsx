@@ -2353,7 +2353,7 @@ export default function Home() {
     let desktopRequestCount = 0;
     const runDesktopFallback = async (
       progressMessage: string,
-      { count = requestedCount }: { count?: number } = {},
+      { count = requestedCount, compact = false }: { count?: number; compact?: boolean } = {},
     ) => {
       if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
       if (desktopRequestCount >= 2) {
@@ -2361,7 +2361,7 @@ export default function Home() {
       }
       desktopRequestCount += 1;
       options.onProgress?.(progressMessage);
-      const boundedCount = normalizeIdeaCount(count);
+      const boundedCount = normalizeIdeaCount(compact ? Math.min(2, count) : count);
       const generationPrompt = (options.promptOverride ?? generationPromptFor(snapshot.profile, snapshot.project.domain))
         .replace("Generate 8 diverse candidates", `Generate ${boundedCount} diverse candidates`);
       try {
@@ -2411,8 +2411,8 @@ export default function Home() {
       const recovery = classifyAiRunFailure(forge, connection.saved.provider);
       if (!recovery.allowIdeaForgeFallback) throw new Error(recovery.userMessage);
       result = await runDesktopFallback(recovery.category === "timeout"
-        ? `Idea Forge's deep pass reached its time budget. SIFT is generating all ${requestedCount} requested ideas with one lighter request using the same model.`
-        : `${recovery.userMessage} SIFT is generating all ${requestedCount} requested ideas with one lighter request using the same model.`);
+        ? "Idea Forge's deep pass reached its time budget. SIFT is finishing a smaller slate with one lighter request using the same model."
+        : `${recovery.userMessage} SIFT is finishing a smaller slate with one lighter request using the same model.`, { compact: true });
       sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.3.0" };
     }
 
@@ -2450,12 +2450,22 @@ export default function Home() {
     } catch (error) {
       if (sourceDetails.engine === "desktop_single_pass") throw error;
       result = await runDesktopFallback(
-        `Idea Forge's ideas could not pass SIFT's local quality check. SIFT is generating all ${requestedCount} requested ideas with one lighter request using the same model.`,
+        "Idea Forge's ideas could not pass SIFT's local quality check. SIFT is finishing a smaller slate with one lighter request using the same model.",
+        { compact: true },
       );
       sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.3.0" };
       assessed = assessStandardResult();
     }
     let { qualitySlate, selected } = assessed;
+    if (selected.length === 0 && sourceDetails.engine === "python_multistage") {
+      result = await runDesktopFallback(
+        "Idea Forge's ideas did not pass SIFT's local quality check. SIFT is finishing a smaller slate with one lighter request using the same model.",
+        { compact: true },
+      );
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.3.0" };
+      if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
+      ({ qualitySlate, selected } = assessStandardResult());
+    }
     if (selected.length < requestedCount && desktopRequestCount < 2) {
       const deficit = requestedCount - selected.length;
       const makeUpCount = Math.min(12, Math.max(deficit + 2, deficit * 2));

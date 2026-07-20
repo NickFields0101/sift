@@ -228,9 +228,11 @@ class IdeaForgeWorkerTests(unittest.TestCase):
         output = io.StringIO()
         responses = iter((frames(8), raw_candidates(12), final_ideas(8)))
         prompts: list[list[dict[str, str]]] = []
+        stage_timeouts: list[float] = []
 
         def fake_client(config, messages, **kwargs):
             prompts.append(messages)
+            stage_timeouts.append(kwargs["timeout_seconds"])
             return json.dumps(next(responses))
 
         worker = Worker(output, model_client=fake_client)

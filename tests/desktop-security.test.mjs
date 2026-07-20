@@ -81,8 +81,9 @@ test("Idea Forge failures recover through a bounded exact-count generation path"
   assert.match(generation, /if \(!recovery\.allowIdeaForgeFallback\) throw new Error\(recovery\.userMessage\)/);
   assert.match(generation, /SIFT is trying its standard idea generator now/);
   assert.match(generation, /count: boundedCount/);
-  assert.doesNotMatch(generation, /Math\.min\(2, requestedCount\)|compact: true/);
-  assert.match(generation, /generating all \$\{requestedCount\} requested ideas/);
+  assert.match(generation, /compact \? Math\.min\(2, count\) : count/);
+  assert.match(generation, /\{ compact: true \}/);
+  assert.match(generation, /finishing a smaller slate with one lighter request/);
   assert.match(generation, /const makeUpCount = Math\.min\(12, Math\.max\(deficit \+ 2, deficit \* 2\)\)/);
   assert.doesNotMatch(generation, /exclusionBrief|JSON\.stringify\(exclusionBrief\)/);
   assert.match(generation, /snapshot\.ideas/);
