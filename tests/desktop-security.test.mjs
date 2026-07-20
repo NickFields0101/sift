@@ -38,15 +38,30 @@ test("AI generation cannot write deterministic review inputs", async () => {
   const generationEnd = page.indexOf("async function startQuickRun", generationStart);
   assert.ok(generationStart >= 0 && generationEnd > generationStart);
   const generationFunction = page.slice(generationStart, generationEnd);
-  assert.match(generationFunction, /ideas:\s*\[\.\.\.current\.ideas, \.\.\.candidates\]/);
+  assert.match(generationFunction, /const requestedCount = normalizeIdeaCount\(ideaCount\)/);
+  assert.match(generationFunction, /if \(candidates\.length !== requestedCount\)/);
+  assert.match(generationFunction, /const nextState = \{ \.\.\.stateAtCommit, ideas: \[\.\.\.stateAtCommit\.ideas, \.\.\.candidates\] \}/);
+  assert.match(generationFunction, /localStorage\.setItem\(STORAGE_KEY, JSON\.stringify\(nextState\)\)/);
+  assert.ok(
+    generationFunction.indexOf("if (candidates.length !== requestedCount)")
+      < generationFunction.indexOf("localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState))"),
+    "an incomplete slate must fail before anything is persisted",
+  );
+  assert.ok(
+    generationFunction.indexOf("localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState))")
+      < generationFunction.indexOf("setState(nextState)"),
+    "generated ideas must be durably saved before success reaches the live UI",
+  );
   assert.match(generationFunction, /ideaIds:\s*candidates\.map\(\(candidate\) => candidate\.id\)/);
   assert.match(generationFunction, /setSection\("ideas"\)/);
+  assert.match(generationFunction, /status: "error"/);
+  assert.match(generationFunction, /No ideas were added/);
   assert.match(page, /Latest generation/);
-  assert.match(page, /New ideas are marked below and ranked with your existing ideas/);
+  assert.match(page, /No new ideas were added/);
   assert.doesNotMatch(generationFunction, /updateReview|updateClaim|updateGate|artifacts|gates|claims/);
 });
 
-test("Idea Forge failures recover through one bounded standard-generation path", async () => {
+test("Idea Forge failures recover through a bounded exact-count generation path", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const start = page.indexOf("async function generateQualitySlate");
   const end = page.indexOf("async function generateWithConnectedLlm", start);
@@ -54,18 +69,43 @@ test("Idea Forge failures recover through one bounded standard-generation path",
   const generation = page.slice(start, end);
 
   assert.match(generation, /const runDesktopFallback = async/);
+  assert.match(generation, /let desktopRequestCount = 0/);
+  assert.match(generation, /if \(desktopRequestCount >= 2\)/);
+  assert.match(generation, /retryableInvalidOutput && desktopRequestCount < 2/);
   assert.match(generation, /profileMode: snapshot\.profile\.mode/);
   assert.match(generation, /createStandardGenerationFailure\("request", error\)/);
   assert.match(generation, /createStandardGenerationFailure\("quality_gate", error\)/);
   assert.match(generation, /classifyAiRunFailure\(forge, connection\.saved\.provider\)/);
   assert.match(generation, /if \(!recovery\.allowIdeaForgeFallback\) throw new Error\(recovery\.userMessage\)/);
   assert.match(generation, /SIFT is trying its standard idea generator now/);
-  assert.match(generation, /fallbackCount = compact \? Math\.min\(2, requestedCount\) : requestedCount/);
-  assert.match(generation, /\{ compact: true \}/);
+  assert.match(generation, /count: boundedCount/);
+  assert.doesNotMatch(generation, /Math\.min\(2, requestedCount\)|compact: true/);
+  assert.match(generation, /generating all \$\{requestedCount\} requested ideas/);
+  assert.match(generation, /const makeUpCount = Math\.min\(12, Math\.max\(deficit \+ 2, deficit \* 2\)\)/);
+  assert.doesNotMatch(generation, /exclusionBrief|JSON\.stringify\(exclusionBrief\)/);
+  assert.match(generation, /snapshot\.ideas/);
+  assert.match(generation, /selected\.length < requestedCount && desktopRequestCount < 2/);
+  assert.match(generation, /No ideas were added/);
+  assert.match(generation, /partial: false/);
   assert.doesNotMatch(generation, /Continuing automatically/);
   assert.match(generation, /if \(options\.isCancelled\?\.\(\)\) return;[^]*options\.onProgress\?\.\(progress\.message, progress\.percent\)/);
-  assert.match(generation, /sourceDetails = \{ engine: "desktop_single_pass", pipelineVersion: "idea-fallback\/1\.2\.0" \}/);
+  assert.match(generation, /sourceDetails = \{ engine: "desktop_single_pass", pipelineVersion: "idea-fallback\/1\.3\.0" \}/);
   assert.equal((generation.match(/connection\.bridge\.llm\.generateIdeas\(/g) ?? []).length, 1, "all recovery branches share one bounded fallback helper");
+});
+
+test("project state is synchronously mirrored and idea counts are whole numbers", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /const \[state, setReactState\] = useState<AppState>\(defaultState\)/);
+  const mirrorStart = page.indexOf("const setState = useCallback");
+  const mirrorEnd = page.indexOf("}, []);", mirrorStart);
+  assert.ok(mirrorStart >= 0 && mirrorEnd > mirrorStart);
+  const mirror = page.slice(mirrorStart, mirrorEnd);
+  assert.match(mirror, /update\(stateRef\.current\)/);
+  assert.ok(mirror.indexOf("stateRef.current = nextState") < mirror.indexOf("setReactState(nextState)"));
+  assert.doesNotMatch(page, /useEffect\(\(\) => \{\s*stateRef\.current = state;\s*\}, \[state\]\)/);
+  assert.match(page, /Math\.trunc\(Number\.isFinite\(value\) \? value : 1\)/);
+  assert.match(page, /type="number" min="1" max="12" step=\{1\}/);
+  assert.match(page, /setIdeaCount\(normalizeIdeaCount\(Number\(event\.currentTarget\.value\)\)\)/);
 });
 
 test("selecting a different idea cannot inherit the prior idea's review or evidence", async () => {

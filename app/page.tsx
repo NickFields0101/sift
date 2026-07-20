@@ -3,7 +3,7 @@
 /* Brand images use native img elements so the same component bundles under Next.js and Electron's Vite renderer. */
 /* eslint-disable @next/next/no-img-element */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import {
   ARCHETYPES,
   ENGINE_VERSION,
@@ -104,6 +104,10 @@ const SIFT_WORDMARK_DARK_URL = brandAssetUrl("sift-wordmark-dark.png");
 const PERSONALITY_DRAFT_KEY = SIFT_PERSONALITY_DRAFT_KEY;
 const PERSONALITY_ITEMS_PER_PAGE = 10;
 const THEME_KEY = "sift-theme-v1";
+
+function normalizeIdeaCount(value: number) {
+  return Math.max(1, Math.min(12, Math.trunc(Number.isFinite(value) ? value : 1)));
+}
 const EVIDENCE_GRADE_LABELS: Record<EvidenceGrade, string> = {
   E0: "Assertion or unknown",
   E1: "Secondary research or expert opinion",
@@ -1300,7 +1304,13 @@ export default function Home() {
   const [section, setSection] = useState<Section>("overview");
   const [theme, setTheme] = useState<Theme>("dark");
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
-  const [state, setState] = useState<AppState>(defaultState);
+  const [state, setReactState] = useState<AppState>(defaultState);
+  const stateRef = useRef(state);
+  const setState = useCallback((update: SetStateAction<AppState>) => {
+    const nextState = typeof update === "function" ? update(stateRef.current) : update;
+    stateRef.current = nextState;
+    setReactState(nextState);
+  }, []);
   const [hydrated, setHydrated] = useState(false);
   const [toast, setToast] = useState("");
   const [includeProfile, setIncludeProfile] = useState(false);
@@ -1327,6 +1337,10 @@ export default function Home() {
     model: string;
     count: number;
     ideaIds?: string[];
+    requestedCount?: number;
+    status?: "running" | "success" | "error";
+    total?: number;
+    message?: string;
   } | null>(null);
   const [aiAssistBusy, setAiAssistBusy] = useState<"evaluation" | "evidence" | null>(null);
   const [evaluationNotes, setEvaluationNotes] = useState("");
@@ -1357,11 +1371,7 @@ export default function Home() {
   const modelSearchRequestRef = useRef(0);
   const modelConfigRequestRef = useRef(0);
   const clearingLocalDataRef = useRef(false);
-  const stateRef = useRef(state);
   const evaluationNotesRef = useRef(evaluationNotes);
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
   useEffect(() => {
     evaluationNotesRef.current = evaluationNotes;
   }, [evaluationNotes]);
@@ -1449,7 +1459,6 @@ export default function Home() {
         if (parsed && review?.claims.length === RUBRIC.length) {
           const fallback = defaultState();
           // Browser storage is an external system; hydration intentionally happens after mount.
-          // eslint-disable-next-line react-hooks/set-state-in-effect
           setState({
             started: parsed.started === true,
             project: sanitizeProjectDetails(parsed.project, fallback.project),
@@ -1472,8 +1481,9 @@ export default function Home() {
         );
       }
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHydrated(true);
-  }, []);
+  }, [setState]);
 
   useEffect(() => {
     const candidate = readStorageValueCandidate(
@@ -2116,25 +2126,35 @@ export default function Home() {
       }
     }
 
+    let desktopRequestCount = 0;
     const runDesktopFallback = async (
       progressMessage: string,
-      { compact = false }: { compact?: boolean } = {},
+      { count = requestedCount }: { count?: number } = {},
     ) => {
       if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
+      if (desktopRequestCount >= 2) {
+        throw createStandardGenerationFailure("request", new Error("The bounded idea-generation retry was already used."));
+      }
+      desktopRequestCount += 1;
       options.onProgress?.(progressMessage);
-      const fallbackCount = compact ? Math.min(2, requestedCount) : requestedCount;
+      const boundedCount = normalizeIdeaCount(count);
       const generationPrompt = (options.promptOverride ?? generationPromptFor(snapshot.profile, snapshot.project.domain))
-        .replace("Generate 8 diverse candidates", `Generate ${fallbackCount} diverse candidates`);
+        .replace("Generate 8 diverse candidates", `Generate ${boundedCount} diverse candidates`);
       try {
         return await connection.bridge.llm.generateIdeas({
           prompt: generationPrompt,
-          count: fallbackCount,
+          count: boundedCount,
           profileMode: snapshot.profile.mode,
           provider: connection.saved.provider,
           baseUrl: connection.saved.baseUrl,
           model: connection.saved.model,
         });
       } catch (error) {
+        const retryableInvalidOutput = error instanceof Error
+          && /did not return valid json|returned no usable text|returned no ideas|did not return any complete ideas/i.test(error.message);
+        if (retryableInvalidOutput && desktopRequestCount < 2 && !options.isCancelled?.()) {
+          return runDesktopFallback("The model's first response was incomplete. SIFT is making one bounded format-recovery attempt.", { count: boundedCount });
+        }
         throw createStandardGenerationFailure("request", error);
       }
     };
@@ -2162,14 +2182,14 @@ export default function Home() {
       sourceDetails = { engine: "python_multistage", pipelineVersion: forge.result.pipelineVersion };
     } else if (forge.kind === "unavailable") {
       result = await runDesktopFallback("Idea Forge is unavailable. SIFT is trying its standard idea generator now.");
-      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.2.0" };
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.3.0" };
     } else {
       const recovery = classifyAiRunFailure(forge, connection.saved.provider);
       if (!recovery.allowIdeaForgeFallback) throw new Error(recovery.userMessage);
       result = await runDesktopFallback(recovery.category === "timeout"
-        ? "Idea Forge's deep pass reached its time budget. SIFT is finishing a smaller slate with one lighter request using the same model."
-        : `${recovery.userMessage} SIFT is finishing a smaller slate with one lighter request using the same model.`, { compact: true });
-      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.2.0" };
+        ? `Idea Forge's deep pass reached its time budget. SIFT is generating all ${requestedCount} requested ideas with one lighter request using the same model.`
+        : `${recovery.userMessage} SIFT is generating all ${requestedCount} requested ideas with one lighter request using the same model.`);
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.3.0" };
     }
 
     if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
@@ -2183,6 +2203,7 @@ export default function Home() {
         candidates,
         requestedCount,
         (candidate) => calculateGenerationPriority(snapshot.profile, candidate.scores),
+        snapshot.ideas,
       );
       return {
         qualitySlate,
@@ -2205,29 +2226,38 @@ export default function Home() {
     } catch (error) {
       if (sourceDetails.engine === "desktop_single_pass") throw error;
       result = await runDesktopFallback(
-        "Idea Forge's ideas could not pass SIFT's local quality check. SIFT is finishing a smaller slate with one lighter request using the same model.",
-        { compact: true },
+        `Idea Forge's ideas could not pass SIFT's local quality check. SIFT is generating all ${requestedCount} requested ideas with one lighter request using the same model.`,
       );
-      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.2.0" };
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.3.0" };
       assessed = assessStandardResult();
     }
     let { qualitySlate, selected } = assessed;
-    if (selected.length === 0 && sourceDetails.engine === "python_multistage") {
-      result = await runDesktopFallback(
-        "Idea Forge's ideas did not pass SIFT's local quality check. SIFT is finishing a smaller slate with one lighter request using the same model.",
-        { compact: true },
+    if (selected.length < requestedCount && desktopRequestCount < 2) {
+      const deficit = requestedCount - selected.length;
+      const makeUpCount = Math.min(12, Math.max(deficit + 2, deficit * 2));
+      const makeUpResult = await runDesktopFallback(
+        `SIFT found ${selected.length} of ${requestedCount} new, distinct ideas. It is making one bounded attempt to complete the slate.`,
+        { count: makeUpCount },
       );
-      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.2.0" };
-      if (options.isCancelled?.()) throw new Error("Idea generation was cancelled.");
-      ({ qualitySlate, selected } = assessStandardResult());
+      const makeUpCandidates = generatedCandidatesFromResult(
+        makeUpResult,
+        snapshot.profile.mode === "private",
+        { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.3.0" },
+      );
+      qualitySlate = selectQualitySlate(
+        [...selected, ...makeUpCandidates],
+        requestedCount,
+        (candidate) => calculateGenerationPriority(snapshot.profile, candidate.scores),
+        snapshot.ideas,
+      );
+      selected = qualitySlate.selected.map(({ candidate }) => candidate);
+      result = makeUpResult;
+      sourceDetails = { engine: "desktop_single_pass", pipelineVersion: "idea-fallback/1.3.0" };
     }
-    if (selected.length === 0) {
-      const firstIssue = qualitySlate.rejected.flatMap(({ report }) => report.blockers)[0]?.message;
-      throw createStandardGenerationFailure("quality_gate", new Error(firstIssue
-        ? `The generated slate failed SIFT's local idea-quality contract: ${firstIssue}`
-        : "The generated slate was too vague or duplicated to pass SIFT's local idea-quality contract."));
+    if (selected.length < requestedCount) {
+      throw new Error(`SIFT found ${selected.length} of ${requestedCount} new, distinct ideas after one bounded retry. No ideas were added. Try again, choose a different model, or make the opportunity boundary more specific.`);
     }
-    return { candidates: selected, result, partial: qualitySlate.partial, sourceDetails };
+    return { candidates: selected, result, partial: false, sourceDetails };
   }
 
   async function generateWithConnectedLlm() {
@@ -2251,6 +2281,18 @@ export default function Home() {
     }
 
     const requestId = ++generationRequestRef.current;
+    const requestedCount = normalizeIdeaCount(ideaCount);
+    setLastGeneration({
+      provider: llmConfig.provider,
+      model: llmConfig.model,
+      count: 0,
+      ideaIds: [],
+      requestedCount,
+      status: "running",
+      total: stateRef.current.ideas.length,
+      message: "Generating and checking a new slate. Nothing has been added yet.",
+    });
+    setSection("ideas");
     setGeneratingIdeas(true);
     try {
       const saved = normalizeLlmConfig(await bridge.llm.saveConfig(currentLlmInput()));
@@ -2262,17 +2304,52 @@ export default function Home() {
       const slate = await generateQualitySlate(
         { bridge, saved },
         stateRef.current,
-        ideaCount,
-        { isCancelled: () => requestId !== generationRequestRef.current },
+        requestedCount,
+        {
+          isCancelled: () => requestId !== generationRequestRef.current,
+          onProgress: (message, percent) => {
+            if (requestId !== generationRequestRef.current) return;
+            setLastGeneration((current) => current?.status === "running"
+              ? {
+                  ...current,
+                  message: `${message}${typeof percent === "number" ? ` (${Math.round(percent)}%)` : ""}`,
+                }
+              : current);
+          },
+        },
       );
       if (requestId !== generationRequestRef.current) return;
-      const { candidates, result } = slate;
-      setState((current) => ({ ...current, ideas: [...current.ideas, ...candidates] }));
+      const { candidates: generatedCandidates, result } = slate;
+      const stateAtCommit = stateRef.current;
+      const commitSlate = selectQualitySlate(
+        generatedCandidates,
+        requestedCount,
+        (candidate) => calculateGenerationPriority(stateAtCommit.profile, candidate.scores),
+        stateAtCommit.ideas,
+      );
+      const candidates = commitSlate.selected.map(({ candidate }) => candidate);
+      if (candidates.length !== requestedCount) {
+        throw new Error(`SIFT found ${candidates.length} of ${requestedCount} ideas that were still new at save time. No ideas were added.`);
+      }
+      const nextState = { ...stateAtCommit, ideas: [...stateAtCommit.ideas, ...candidates] };
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+      } catch {
+        throw new Error("The ideas were generated, but SIFT could not save them on this computer. No ideas were added.");
+      }
+      stateRef.current = nextState;
+      setState(nextState);
       setLastGeneration({
         provider: result.provider,
         model: result.model,
         count: candidates.length,
         ideaIds: candidates.map((candidate) => candidate.id),
+        requestedCount,
+        status: "success",
+        total: nextState.ideas.length,
+        message: slate.partial
+          ? `${candidates.length} distinct ideas passed SIFT's quality checks.`
+          : `${candidates.length} ideas were generated, checked, and saved.`,
       });
       setSection("ideas");
       setToast(slate.partial
@@ -2280,9 +2357,23 @@ export default function Home() {
         : `${candidates.length} multi-stage hypotheses added`);
     } catch (error) {
       if (requestId !== generationRequestRef.current) return;
-      setLlmMessage(error instanceof Error ? error.message : "Idea generation failed.");
+      const message = error instanceof Error && error.name === "StandardGenerationFailure"
+        ? classifyAiRunFailure(error, llmConfig.provider).userMessage
+        : error instanceof Error ? error.message : "Idea generation failed.";
+      setLastGeneration((current) => ({
+        provider: current?.provider ?? llmConfig.provider,
+        model: current?.model ?? llmConfig.model,
+        count: 0,
+        ideaIds: [],
+        requestedCount,
+        status: "error",
+        total: stateRef.current.ideas.length,
+        message,
+      }));
+      setLlmMessage(message);
       setLlmMessageTone("error");
-      setSection("model");
+      setToast("No new ideas were added");
+      setSection("ideas");
     } finally {
       if (requestId === generationRequestRef.current) setGeneratingIdeas(false);
     }
@@ -3824,7 +3915,13 @@ export default function Home() {
 
         {section === "ideas" && (
           <div className="page-section">
-            <PageHeading eyebrow="Create" title="Find your idea." description="Generate new ideas, add your own, and choose one to test." />
+            <PageHeading
+              eyebrow="Create"
+              title="Find your idea."
+              description={state.ideas.length === 0
+                ? "Generate new ideas, add your own, and choose one to test."
+                : `${state.ideas.length} saved idea${state.ideas.length === 1 ? "" : "s"}. Generate more or choose one to test.`}
+            />
             {quickRunPhase === "choose-idea" && <div className="quick-run-checkpoint"><strong>Quick Run checkpoint · Choose the direction</strong><span>{quickRunMessage}</span><button className="text-button" onClick={exitQuickRun}>Use manual flow</button></div>}
             <div className="idea-start-card">
               <div>
@@ -3858,14 +3955,21 @@ export default function Home() {
                 <button className="button small secondary" onClick={() => copyText(prompt, "LLM prompt copied")}>Copy prompt</button>
               </details>
             </details>
-            {lastGeneration && (lastGeneration.ideaIds?.length ?? 0) > 0 && (
-              <div className="generation-result" role="status">
+            {lastGeneration && (lastGeneration.status || (lastGeneration.ideaIds?.length ?? 0) > 0) && (
+              <div className={`generation-result ${lastGeneration.status ?? "success"}`} role={lastGeneration.status === "error" ? "alert" : "status"}>
                 <div>
-                  <span>Latest generation</span>
-                  <strong>{lastGeneration.count} new idea{lastGeneration.count === 1 ? "" : "s"} added</strong>
-                  <small>New ideas are marked below and ranked with your existing ideas.</small>
+                  <span>{lastGeneration.status === "running" ? "Generating ideas" : lastGeneration.status === "error" ? "Generation stopped" : "Latest generation"}</span>
+                  <strong>{lastGeneration.status === "running"
+                    ? `Creating ${lastGeneration.requestedCount ?? ideaCount} new ideas`
+                    : lastGeneration.status === "error"
+                      ? "No new ideas were added"
+                      : `${lastGeneration.count} new idea${lastGeneration.count === 1 ? "" : "s"} added`}</strong>
+                  <small>{lastGeneration.message ?? "New ideas are marked below and ranked with your existing ideas."}</small>
                 </div>
-                <b>{state.ideas.length} total</b>
+                <div className="generation-result-meta">
+                  <b>{lastGeneration.status === "running" ? `${lastGeneration.requestedCount ?? ideaCount} requested` : `${lastGeneration.total ?? state.ideas.length} total`}</b>
+                  {lastGeneration.status === "error" && <button className="text-button" onClick={() => setSection("model")}>Check AI settings →</button>}
+                </div>
               </div>
             )}
             {sortedIdeas.length === 0 ? (
@@ -4100,7 +4204,7 @@ export default function Home() {
                     <div className="model-field-grid">
                       <label className="idea-count-field">
                         <span>Ideas to generate in manual mode</span>
-                        <input type="number" min="1" max="12" value={ideaCount} onChange={(event) => setIdeaCount(Math.max(1, Math.min(12, Number(event.target.value) || 1)))} />
+                        <input type="number" min="1" max="12" step={1} value={ideaCount} onChange={(event) => setIdeaCount(normalizeIdeaCount(Number(event.currentTarget.value)))} />
                       </label>
                       <label className="full-field">
                         <span>Base URL</span>
